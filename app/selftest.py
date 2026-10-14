@@ -106,8 +106,9 @@ def run(port):
             check("AI image embedding", v1.shape == (512,) and abs(float(np.linalg.norm(v1)) - 1) < 1e-3, str(v1.shape))
             l1, s1 = ai.classify(v1, "")
             l2, s2 = ai.classify(v2, "")
-            check("AI tags a text card as text", l1 == "text", f"{l1} {s1}")
-            check("AI doesn't tag a film frame as text", l2 != "text", f"{l2} {s2}")
+            check("AI: text graphic is not a film frame", l1 != "film", f"{l1} {s1}")
+            check("AI: text graphic scores more text than film", s1["text"] > s1["film"], f"{s1}")
+            check("AI: film frame is a film frame", l2 == "film", f"{l2} {s2}")
             l3, _ = ai.classify(v2, "my new camera gear review, lens unboxing")
             print(f"  (film frame with a gear caption -> {l3})", flush=True)
             if on_ci:

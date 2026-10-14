@@ -23,7 +23,7 @@ from PIL import Image, ImageOps
 
 from . import db
 
-AI_VERSION = 1
+AI_VERSION = 2   # bump when prompts change: everything gets re-tagged
 REPO = "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/"
 FILES = {
     "vision": ("onnx/vision_model_quantized.onnx", "vision.onnx"),
@@ -63,6 +63,8 @@ PROMPTS = {
     "text": [
         "a screenshot with text", "an infographic", "a slide with lots of text", "a quote in large text",
         "a chart with numbers", "a user interface screenshot", "a text post with a plain background",
+        "a list of tips written in text", "words and numbers on a plain background", "an instagram carousel slide with text",
+        "a page of written instructions", "a graphic with a numbered list",
     ],
 }
 CAPTION_HINTS = {
