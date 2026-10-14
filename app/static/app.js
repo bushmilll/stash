@@ -278,6 +278,13 @@ function renderScope() {
     h("button", { onclick: () => exportDialog({ collection: f.collection, count: S.total }) }, "Export"),
     h("button", { onclick: renameCollection }, "Rename"),
     h("button", { class: "danger", onclick: deleteCollection }, "Delete"));
+  if (f.uncollected && S.total) meta.push(h("span", { class: "note" }, "Saves that aren't in any collection"),
+    h("button", { class: "danger", onclick: async () => {
+      if (!(await askConfirm(`Move ${S.total} saves to the trash?`, { text: "Everything that isn't in a collection goes to the trash. You can restore it until you empty the trash, and sync won't bring it back.", label: "Move to trash", danger: true }))) return;
+      const r = await api("/api/posts/trash-uncollected", { method: "POST", body: {} });
+      toast(`Moved ${r.count} to trash`, { action: { label: "Undo", fn: async () => { await api("/api/posts/trash", { method: "POST", body: { ids: r.ids, restore: true } }); loadSidebar(); reload(); } } });
+      loadSidebar(); reload();
+    } }, "Move all to trash"));
   if (f.trashed) meta.push(h("span", { class: "note" }, "Nothing is deleted until you empty the trash"),
     h("button", { class: "danger", onclick: emptyTrash }, "Empty trash"));
   if (f.creator) meta.push(h("button", { onclick: () => openExternal(`https://www.instagram.com/${encodeURIComponent(f.creator)}/`) }, "Open on Instagram"));
@@ -344,12 +351,12 @@ let cols = [], colHeights = [];
 const fr = { pending: [], tail: null, width: 0 };
 function colCount() {
   const w = $("#grid").clientWidth || window.innerWidth;
-  const d = Number($("#density").value);
+  const d = 11 - Number($("#density").value);          // slider: right = bigger tiles = fewer columns
   const ideal = Math.max(2, Math.round(w / (1600 / d)));
   return window.innerWidth < 600 ? Math.min(ideal, 2) : ideal;
 }
 function frameHeight() {
-  const d = Number($("#density").value);              // 2 (big) … 9 (small)
+  const d = 11 - Number($("#density").value);         // slider right = bigger rows
   const hgt = Math.round(470 - (d - 2) * 46);
   return window.innerWidth < 600 ? Math.min(hgt, 150) : hgt;
 }
@@ -830,7 +837,9 @@ function renderDrawer(focus) {
     drop.textContent = "Reading export…";
     try {
       const r = await api("/api/import", { method: "POST", body: fd });
-      drop.textContent = `Found ${r.posts_found.toLocaleString()} saves (${r.new_posts.toLocaleString()} new) across ${r.collections.length} collections.`;
+      drop.textContent = `Added ${r.new_posts.toLocaleString()} saves from ${r.collections.length} collections` +
+        (r.skipped_uncollected ? `, skipped ${r.skipped_uncollected.toLocaleString()} that aren't in a collection` : "") +
+        (r.dated ? `. Real save dates applied to ${r.dated.toLocaleString()} posts.` : ".");
       toast(`Imported ${r.new_posts.toLocaleString()} saves. Run Sync now to download their media.`);
       loadSidebar(); reload();
     } catch (e) { drop.textContent = e.message; }
@@ -859,7 +868,7 @@ function renderDrawer(focus) {
   const cfile = h("input", { value: s.cookies_file || "", placeholder: "/path/to/cookies.txt" });
   const cfileField = h("label", { class: "field", hidden: s.cookies_source !== "file" }, "cookies.txt path", cfile);
   browser.onchange = () => { cfileField.hidden = browser.value !== "file"; };
-  const allSaved = h("input", { type: "checkbox", checked: s.sync_all_saved });
+  const allSaved = h("input", { type: "checkbox", checked: !!s.include_uncollected });
   const colList = h("div", { class: "col-list" });
   const colRows = [];
   const addColRow = (c = { name: "", url: "" }) => {
@@ -888,7 +897,7 @@ function renderDrawer(focus) {
       h("label", { class: "field" }, "Instagram username", user),
       h("label", { class: "field" }, "Browser you're logged in with", browser)),
     cfileField,
-    h("label", { class: "check" }, allSaved, "Also sync All posts (catches saves that aren't in a collection)"),
+    h("label", { class: "check" }, allSaved, "Also bring in saves that aren't in a collection (your whole All posts feed and the rest of the data export). Off = only your collections."),
     h("h3", { class: "sub" }, "Collections to sync"),
     h("p", {}, "Open each collection on instagram.com in your browser and paste its address. Linked collections download in one pass, which is much faster than fetching posts one by one."),
     colList,
@@ -903,7 +912,7 @@ function renderDrawer(focus) {
     h("div", { class: "row", style: "margin-top:12px" },
       h("button", { class: "primary", onclick: () => saveSettings({
         instagram_username: user.value.trim().replace(/^@/, ""), cookies_source: browser.value, cookies_file: cfile.value.trim(),
-        sync_all_saved: allSaved.checked, auto_sync_hours: Number(auto.value), backfill_per_run: Number(perRun.value) || 150,
+        include_uncollected: allSaved.checked, auto_sync_hours: Number(auto.value), backfill_per_run: Number(perRun.value) || 150,
         request_delay: [Number(d0.value) || 6, Math.max(Number(d1.value) || 12, Number(d0.value) || 6)],
         collections: colRows.map((r) => ({ name: r.name.value.trim(), url: r.url.value.trim() })).filter((r) => r.url),
       }) }, "Save sync settings")));
@@ -1025,7 +1034,7 @@ $("#q").addEventListener("input", () => {
   qTimer = setTimeout(() => { S.filter.q = $("#q").value.trim(); if (!S.filter.q) delete S.filter.q; writeHash(); reload(); }, 220);
 });
 $("#sort").onchange = () => { S.sort = $("#sort").value; S.seed = Math.floor(Math.random() * 1e6); try { localStorage.setItem("sf-sort", S.sort); } catch {} reload(); };
-$("#density").oninput = () => { try { localStorage.setItem("sf-density", $("#density").value); } catch {} layout(true); };
+$("#density").oninput = () => { try { localStorage.setItem("sf-size", $("#density").value); } catch {} layout(true); };
 $("#menuBtn").onclick = () => $("#side").classList.toggle("open");
 let resizeT; window.addEventListener("resize", () => { clearTimeout(resizeT); resizeT = setTimeout(() => layout(false), 120); });
 new IntersectionObserver((e) => { if (e[0].isIntersecting) loadMore(); }, { rootMargin: "1200px" }).observe($("#sentinel"));
@@ -1087,7 +1096,9 @@ applyTheme(getTheme());
 // boot
 try {
   const so = localStorage.getItem("sf-sort"); if (so) { S.sort = so; $("#sort").value = so; }
-  const de = localStorage.getItem("sf-density"); if (de) $("#density").value = de;
+  const sz = localStorage.getItem("sf-size"), old = localStorage.getItem("sf-density");
+  if (sz) $("#density").value = sz; else if (old) $("#density").value = 11 - Number(old);   // flip the old setting
+  else $("#density").value = 6;
   const vw = localStorage.getItem("sf-view"); if (vw === "frames" || vw === "index") S.view = vw;
 } catch {}
 readHash();

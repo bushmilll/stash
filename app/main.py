@@ -205,7 +205,7 @@ async def sidebar(request):
         "SELECT 'trash', COUNT(*) FROM posts WHERE deleted_at IS NOT NULL AND status!='removed' UNION ALL "
         "SELECT 'lowq', COUNT(DISTINCT m.post_id) FROM media m JOIN posts p ON p.id=m.post_id WHERE m.kind='video' "
         "AND COALESCE(m.hq,0)=0 AND p.status='ready' AND p.deleted_at IS NULL UNION ALL "
-        "SELECT 'uncollected', COUNT(*) FROM posts WHERE status='ready' AND deleted_at IS NULL AND id NOT IN "
+        "SELECT 'uncollected', COUNT(*) FROM posts WHERE status!='removed' AND deleted_at IS NULL AND id NOT IN "
         "(SELECT post_id FROM post_collections)").fetchall())
     boards = [dict(r) for r in c.execute(
         "SELECT id, name, items FROM boards ORDER BY updated_at DESC")]
@@ -313,7 +313,7 @@ async def upload_export(request):
             files.update(importer.read_upload(up.filename or "upload.json", raw))
     if not files:
         return err(400, "No saved-posts JSON found. Make sure you requested the export in JSON format.")
-    result = await run_in_threadpool(importer.import_export, files)
+    result = await run_in_threadpool(importer.import_export, files, bool(db.load_settings().get("include_uncollected")))
     if result["posts_found"] == 0:
         return err(400, "Couldn't find any saved posts in that file. Use the JSON export, "
                         "and include 'Saved' in the information you request.")
@@ -488,6 +488,17 @@ async def trash_posts(request):
         for pid in ids:
             c.execute("UPDATE posts SET deleted_at=? WHERE id=?", (None if restore else db.now(), pid))
     return JSONResponse({"ok": True, "count": len(ids)})
+
+
+async def trash_uncollected(request):
+    """Move every save that isn't in any collection to the trash (undoable until the trash is emptied)."""
+    with db.tx() as c:
+        ids = [r[0] for r in c.execute(
+            "SELECT id FROM posts WHERE deleted_at IS NULL AND status!='removed' "
+            "AND id NOT IN (SELECT post_id FROM post_collections)")]
+        now = db.now()
+        c.executemany("UPDATE posts SET deleted_at=? WHERE id=?", [(now, i) for i in ids])
+    return JSONResponse({"ok": True, "count": len(ids), "ids": ids})
 
 
 async def purge_trash(request):
@@ -725,6 +736,7 @@ def create_app():
         Route("/api/posts/bulk", bulk, methods=["POST"]),
         Route("/api/posts/trash", trash_posts, methods=["POST"]),
         Route("/api/trash/purge", purge_trash, methods=["POST"]),
+        Route("/api/posts/trash-uncollected", trash_uncollected, methods=["POST"]),
         Route("/api/export", export_batch, methods=["POST"]),
         Route("/api/search-image", search_image, methods=["POST"]),
         Route("/api/facets", facets),

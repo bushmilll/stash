@@ -177,7 +177,7 @@ def _feeds(s):
         if url:
             feeds.append((url.split("?")[0], (col.get("name") or "").strip() or None))
     user = (s.get("instagram_username") or "").strip().lstrip("@")
-    if s.get("sync_all_saved") and user:
+    if s.get("include_uncollected") and user:
         feeds.append((f"https://www.instagram.com/{user}/saved/all-posts/", None))
     return feeds
 
@@ -271,7 +271,7 @@ def _download_dash(manifest, dest, headers=None):
     return v
 
 
-def _save_post(post, files, collection=None, upgrade=False):
+def _save_post(post, files, collection=None, upgrade=False, saved_at=None):
     """post: gallery-dl metadata dict; files: [(url, filedict)]. Downloads media and records the post."""
     code = post.get("post_shortcode") or post.get("shortcode")
     if not code:
@@ -330,7 +330,8 @@ def _save_post(post, files, collection=None, upgrade=False):
             username=post.get("username") or "",
             caption=post.get("description") or "",
             posted_at=posted_at,
-            saved_at=db.now(),
+            saved_at=saved_at or db.now(),
+            saved_src="feed",
             status="ready", error="",
         )
         # a post's caption/author from the live feed beats what the export had
@@ -384,6 +385,11 @@ def run_sync(jid):
     if not feeds:
         raise StopSync("Nothing to sync yet. Add your Instagram username and/or collection links in Settings.")
     stop_after = int(s.get("stop_after_known") or 30)
+    # Instagram doesn't say when something was saved, but feeds list newest saves first:
+    # stamp new posts by their position so "Newest saves" really is newest first.
+    rerank = int(s.get("rank_version") or 0) < 1     # one-time full pass to fix order from older versions
+    run_start = db.now()
+    ranked = set()
     new_total, linked, failed_posts = 0, 0, 0
     for fi, (url, name) in enumerate(feeds):
         label = name or ("All saved" if "all-posts" in url else url)
@@ -395,6 +401,11 @@ def run_sync(jid):
                 code = post.get("post_shortcode")
                 col = name or post.get("collection_name")
                 pid, status = _status(code)
+                stamp = run_start - seen
+                if rerank and pid and pid not in ranked:
+                    ranked.add(pid)
+                    with db.tx() as c:
+                        c.execute("UPDATE posts SET saved_at=? WHERE id=? AND COALESCE(saved_src,'feed')='feed'", (stamp, pid))
                 if status in ("ready", "removed"):
                     known_streak += 1
                     if col and status == "ready":
@@ -404,12 +415,12 @@ def run_sync(jid):
                             if c.total_changes > before:
                                 linked += 1
                                 db.reindex(c, pid)
-                    if known_streak >= stop_after:
+                    if known_streak >= stop_after and not rerank:
                         break
                 else:
                     known_streak = 0
                     try:
-                        _save_post(post, files, col)
+                        _save_post(post, files, col, saved_at=stamp)
                         new_total += 1
                     except (Cancelled, StopSync):
                         raise
@@ -427,6 +438,8 @@ def run_sync(jid):
             raise
         except Exception as e:
             raise StopSync(f"{label}: {_friendly(e)}")
+    if rerank:
+        db.save_settings({"rank_version": 1})
     msg = f"Synced {len(feeds)} feed(s): {new_total} new post(s)"
     if linked:
         msg += f", {linked} collection link(s) updated"
@@ -479,7 +492,8 @@ def run_backfill(jid):
     _configure(s)
     limit = int(s.get("backfill_per_run") or 150)
     rows = db.conn().execute(
-        "SELECT id, shortcode FROM posts WHERE status IN ('pending','failed') AND attempts < 3 "
+        "SELECT id, shortcode FROM posts WHERE status IN ('pending','failed') AND attempts < 3 AND deleted_at IS NULL "
+        + ("" if s.get("include_uncollected") else "AND id IN (SELECT post_id FROM post_collections) ") +
         "ORDER BY saved_at DESC LIMIT ?", (limit,)).fetchall()
     if not rows:
         return "Nothing to backfill, every post has its media"

@@ -133,22 +133,36 @@ def read_upload(filename, raw: bytes):
     return {filename: raw}
 
 
-def import_export(files):
+def import_export(files, include_uncollected=False):
+    """Bring in saves from Instagram's data export.
+
+    By default only saves that are in one of your collections are added (Stash is for references, not
+    everything you've ever saved). Either way, the export's real save dates are applied to posts Stash
+    already has, which fixes "Newest saves" ordering.
+    """
     posts, memberships = parse_files(files)
-    new = 0
+    in_collection = {code for code, _ in memberships}
+    new = skipped = dated = 0
     with db.tx() as c:
         for code, (user, ts) in posts.items():
-            existed = c.execute("SELECT 1 FROM posts WHERE shortcode=?", (code,)).fetchone()
-            pid = db.upsert_post(c, code, username=user, saved_at=ts)
+            existed = c.execute("SELECT id FROM posts WHERE shortcode=?", (code,)).fetchone()
+            if not existed and not include_uncollected and code not in in_collection:
+                skipped += 1
+                continue
+            pid = db.upsert_post(c, code, username=user, saved_at=ts, saved_src="export" if ts else None)
+            if ts:   # a real save date always beats an estimate
+                c.execute("UPDATE posts SET saved_at=?, saved_src='export' WHERE id=?", (ts, pid))
+                dated += 1
             if not existed:
                 new += 1
         for code, name in memberships:
-            pid = c.execute("SELECT id FROM posts WHERE shortcode=?", (code,)).fetchone()[0]
-            db.add_to_collection(c, pid, name, source="instagram")
-        touched = {code for code in posts}
-        for code in touched:
-            pid = c.execute("SELECT id FROM posts WHERE shortcode=?", (code,)).fetchone()[0]
-            db.reindex(c, pid)
+            row = c.execute("SELECT id FROM posts WHERE shortcode=?", (code,)).fetchone()
+            if row:
+                db.add_to_collection(c, row[0], name, source="instagram")
+        for code in posts:
+            row = c.execute("SELECT id FROM posts WHERE shortcode=?", (code,)).fetchone()
+            if row:
+                db.reindex(c, row[0])
     collections = sorted({n for _, n in memberships})
-    return {"posts_found": len(posts), "new_posts": new, "collections": collections,
-            "collection_links": len(memberships)}
+    return {"posts_found": len(posts), "new_posts": new, "skipped_uncollected": skipped, "dated": dated,
+            "collections": collections, "collection_links": len(memberships)}

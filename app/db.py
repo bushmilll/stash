@@ -152,6 +152,13 @@ def init():
         cols = {r[1] for r in c.execute("PRAGMA table_info(posts)")}
         if "deleted_at" not in cols:
             c.execute("ALTER TABLE posts ADD COLUMN deleted_at INTEGER")
+        if "saved_src" not in cols:
+            # where the "saved" time came from: 'export' = real date from Instagram's data export,
+            # 'feed' = estimated from the order of the collection feed. Older rows: an export date is
+            # well before the moment the post was added; a sync-time stamp is about the same moment.
+            c.execute("ALTER TABLE posts ADD COLUMN saved_src TEXT")
+            c.execute("UPDATE posts SET saved_src = CASE WHEN saved_at IS NOT NULL AND added_at IS NOT NULL "
+                      "AND saved_at < added_at - 3600 THEN 'export' ELSE 'feed' END")
         mcols = {r[1] for r in c.execute("PRAGMA table_info(media)")}
         if "poster" not in mcols:
             c.execute("ALTER TABLE media ADD COLUMN poster TEXT")      # full-res still for videos
@@ -281,11 +288,12 @@ DEFAULT_SETTINGS = {
     "cookies_source": "chrome",          # chrome | firefox | safari | edge | brave | file
     "cookies_file": "",
     "collections": [],                   # [{"name": ..., "url": ...}]
-    "sync_all_saved": True,              # also sync /saved/all-posts/ (catches uncollected saves)
+    "include_uncollected": False,        # also bring in saves that aren't in any collection (All posts feed + data export)
     "auto_sync_hours": 6,                # 0 = off
     "stop_after_known": 30,              # incremental sync: stop a feed after this many already-known posts in a row
     "backfill_per_run": 150,             # max export-only posts to fetch per backfill run
     "request_delay": [6, 12],            # seconds between Instagram API requests (random in range)
+    "rank_version": 0,                   # 1 = save order has been rebuilt from the collection feeds
     "media_dir": "",                     # where originals live; empty = inside the library folder
     "media_move_from": "",               # a move in progress (resumes if the app was closed)
     "media_move_to": "",
