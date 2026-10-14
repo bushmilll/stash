@@ -13,7 +13,7 @@ from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from . import analyze, db, importer, media, sync
+from . import analyze, db, importer, media, storage, sync
 
 STATIC = Path(__file__).parent / "static"
 SORTS = {
@@ -264,7 +264,7 @@ async def download_media(request):
         r = media.media_row(request.path_params["id"])
     except FileNotFoundError:
         return err(404, "Not found")
-    src = db.MEDIA_DIR / r["path"]
+    src = db.media_path(r["path"])
     return FileResponse(src, filename=media.nice_stem(r) + src.suffix, content_disposition_type="attachment")
 
 
@@ -408,7 +408,7 @@ def _resolve_download(url):
         return p, p.name
     if m_ := re.fullmatch(r"/api/media/(\d+)/download", url):
         r = media.media_row(int(m_[1]))
-        src = db.MEDIA_DIR / r["path"]
+        src = db.media_path(r["path"])
         return src, media.nice_stem(r) + src.suffix
     if m_ := re.fullmatch(r"/api/posts/(\d+)/zip", url):
         out = media.post_zip(int(m_[1]))
@@ -457,9 +457,12 @@ async def reveal(request):
     path = body.get("path") or ""
     if body.get("what") == "library":
         path = str(db.DATA_DIR)
+    if body.get("what") == "originals":
+        path = str(db.MEDIA_DIR)
     p = Path(path)
-    # only ever reveal things in Downloads or the library
-    if not p.exists() or not (p.is_relative_to(_downloads_dir()) or p.is_relative_to(db.DATA_DIR)):
+    # only ever reveal things in Downloads, the library or the originals folder
+    allowed = [_downloads_dir(), db.DATA_DIR, *db.media_roots()]
+    if not p.exists() or not any(p == a or p.is_relative_to(a) for a in allowed):
         return err(404, "Couldn't find that file.")
     _open(str(p), reveal=p.is_file())
     return JSONResponse({"ok": True})
@@ -529,7 +532,7 @@ async def export_batch(request):
 
 async def library_info(request):
     def work():
-        return {"size": db.dir_size(db.MEDIA_DIR) + db.dir_size(db.THUMB_DIR),
+        return {"size": sum(db.dir_size(r) for r in db.media_roots() if r.exists()) + db.dir_size(db.THUMB_DIR),
                 "backups": db.list_backups(), "backup_dir": str(db.BACKUP_DIR), "ffmpeg": media.ffmpeg_ok()}
     return JSONResponse(await run_in_threadpool(work))
 
@@ -540,7 +543,43 @@ async def backup_now(request):
 
 
 async def library_check(request):
-    return JSONResponse(await run_in_threadpool(media.check_library))
+    try:
+        return JSONResponse(await run_in_threadpool(media.check_library))
+    except RuntimeError as e:
+        return err(409, str(e))
+
+
+async def media_file(request):
+    """Originals are served from wherever they live now (they can move to Dropbox or a drive while running)."""
+    rel = request.path_params["path"]
+    p = db.media_path(rel)
+    roots = [r.resolve() for r in db.media_roots()]
+    try:
+        rp = p.resolve()
+    except OSError:
+        raise HTTPException(404)
+    if not any(r == rp or r in rp.parents for r in roots):
+        raise HTTPException(404)
+    if not rp.is_file():
+        raise HTTPException(503 if not db.media_available() else 404)
+    return FileResponse(rp)
+
+
+async def storage_info(request):
+    st = await run_in_threadpool(storage.status)
+    if request.query_params.get("sizes"):
+        st.update(await run_in_threadpool(storage.sizes))
+    return JSONResponse(st)
+
+
+async def storage_move(request):
+    body = await request.json()
+    try:
+        target = await run_in_threadpool(storage.prepare_move, body.get("path", ""))
+    except ValueError as e:
+        return err(400, str(e))
+    sync.enqueue("move")
+    return JSONResponse({"ok": True, "target": target})
 
 
 # ---------- moodboards ----------
@@ -696,6 +735,8 @@ def create_app():
         Route("/api/library", library_info),
         Route("/api/library/backup", backup_now, methods=["POST"]),
         Route("/api/library/check", library_check, methods=["POST"]),
+        Route("/api/storage", storage_info),
+        Route("/api/storage/move", storage_move, methods=["POST"]),
         Route("/api/boards", boards, methods=["GET", "POST"]),
         Route("/api/boards/pdf", board_pdf, methods=["POST"]),
         Route("/api/boards/{id:int}", board_one, methods=["GET", "PUT", "DELETE"]),
@@ -712,7 +753,7 @@ def create_app():
         Route("/api/settings", settings, methods=["GET", "PUT"]),
         Route("/api/jobs", jobs, methods=["GET", "POST"]),
         Route("/exports/{name}", export_file),
-        Mount("/files/media", StaticFiles(directory=db.MEDIA_DIR), name="media"),
+        Route("/files/media/{path:path}", media_file),
         Mount("/files/thumbs", StaticFiles(directory=db.THUMB_DIR), name="thumbs"),
         Mount("/static", StaticFiles(directory=STATIC), name="static"),
     ]

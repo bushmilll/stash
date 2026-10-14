@@ -8,6 +8,7 @@ Design notes (keeping your account safe):
   * If Instagram pushes back (login challenge, rate limit), the job stops instead of retrying.
 """
 import queue
+from pathlib import Path
 import random
 import shutil
 import threading
@@ -16,7 +17,7 @@ import traceback
 
 import requests
 
-from . import db, media
+from . import db, media, storage
 
 try:
     from gallery_dl import config as gdl_config, extractor as gdl_extractor, exception as gdl_exc
@@ -76,7 +77,8 @@ def _worker():
         _current.update(id=jid, cancel=False)
         _update(jid, status="running", message="Starting…")
         try:
-            fn = {"sync": run_sync, "backfill": run_backfill, "upgrade": run_upgrade}[kind]
+            fn = {"sync": run_sync, "backfill": run_backfill, "upgrade": run_upgrade,
+                  "move": lambda j: storage.run_move(j, _update, _check_cancel)}[kind]
             msg = fn(jid)
             _update(jid, status="done", message=msg, finished=db.now())
         except Cancelled:
@@ -126,11 +128,18 @@ def start():
                   "WHERE status IN ('queued','running')")
     threading.Thread(target=_worker, daemon=True).start()
     threading.Thread(target=_scheduler, daemon=True).start()
+    pending = db.load_settings().get("media_move_to")
+    if pending:   # the app closed during a move: keep both places readable and finish it
+        db.MEDIA_MOVING_TO = Path(pending)
+        enqueue("move")
 
 
 # ---------- gallery-dl setup ----------
 
 def _configure(s):
+    if not db.media_available():
+        raise StopSync(f"Your originals folder isn't reachable ({db.MEDIA_DIR}). "
+                       "Plug the drive in or check Dropbox is running, then sync again.")
     if not HAVE_GDL:
         raise StopSync("gallery-dl isn't installed. Run: pip install gallery-dl")
     gdl_config.clear()

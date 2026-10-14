@@ -7,14 +7,48 @@ import time
 from pathlib import Path
 
 DATA_DIR = Path(os.environ.get("STASH_DATA", Path.home() / "Stash")).expanduser()
-MEDIA_DIR = DATA_DIR / "media"
-THUMB_DIR = DATA_DIR / "thumbs"
+THUMB_DIR = DATA_DIR / "thumbs"        # previews + video posters: always on this Mac
 EXPORT_DIR = DATA_DIR / "exports"
 DB_PATH = DATA_DIR / "stash.db"
 SETTINGS_PATH = DATA_DIR / "settings.json"
+DEFAULT_MEDIA_DIR = DATA_DIR / "media"
 
-for d in (DATA_DIR, MEDIA_DIR, THUMB_DIR, EXPORT_DIR):
+for d in (DATA_DIR, THUMB_DIR, EXPORT_DIR):
     d.mkdir(parents=True, exist_ok=True)
+
+
+def _initial_media_dir():
+    """Originals can live elsewhere (Dropbox, an external drive). Read that choice before anything else starts."""
+    try:
+        chosen = json.loads(SETTINGS_PATH.read_text()).get("media_dir") if SETTINGS_PATH.exists() else ""
+    except Exception:
+        chosen = ""
+    if chosen:
+        return Path(chosen).expanduser()
+    DEFAULT_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+    return DEFAULT_MEDIA_DIR
+
+
+MEDIA_DIR = _initial_media_dir()
+MEDIA_MOVING_TO = None                 # set while originals are being moved, so files are found in either place
+
+
+def media_available():
+    return MEDIA_DIR.exists()
+
+
+def media_path(rel):
+    """Where an original actually is right now (handles a move in progress)."""
+    p = MEDIA_DIR / rel
+    if MEDIA_MOVING_TO is not None and not p.exists():
+        alt = MEDIA_MOVING_TO / rel
+        if alt.exists():
+            return alt
+    return p
+
+
+def media_roots():
+    return [r for r in (MEDIA_DIR, MEDIA_MOVING_TO) if r is not None]
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -252,6 +286,9 @@ DEFAULT_SETTINGS = {
     "stop_after_known": 30,              # incremental sync: stop a feed after this many already-known posts in a row
     "backfill_per_run": 150,             # max export-only posts to fetch per backfill run
     "request_delay": [6, 12],            # seconds between Instagram API requests (random in range)
+    "media_dir": "",                     # where originals live; empty = inside the library folder
+    "media_move_from": "",               # a move in progress (resumes if the app was closed)
+    "media_move_to": "",
 }
 
 

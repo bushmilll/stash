@@ -1,4 +1,4 @@
-starlette>=0.37
+starlette>=0.40
 uvicorn>=0.30
 python-multipart>=0.0.9
 Pillow>=10

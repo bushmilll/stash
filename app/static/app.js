@@ -895,7 +895,7 @@ function renderDrawer(focus) {
     h("button", { onclick: () => addColRow() }, "Add another collection"),
     h("div", { class: "two", style: "margin-top:14px" },
       h("label", { class: "field" }, "Sync automatically", auto),
-      h("label", { class: "field" }, "Waiting posts to fetch per run", perRun)),
+      h("label", { class: "field" }, "Backlog: old saves to download per sync", perRun)),
     h("details", {},
       h("summary", {}, "Pacing"),
       h("p", {}, "Seconds to wait between requests to Instagram. Going faster than the default raises the chance Instagram asks you to verify your account."),
@@ -912,6 +912,44 @@ function renderDrawer(focus) {
   const appearSec = h("section", {}, h("h3", {}, "Appearance"),
     h("div", { class: "seg" }, ...[["auto", "Match my Mac"], ["light", "Light"], ["dark", "Dark"]].map(([k, l]) =>
       h("button", { class: themeNow === k ? "on" : "", onclick: (e) => { applyTheme(k); e.currentTarget.parentNode.querySelectorAll("button").forEach((b) => b.classList.remove("on")); e.currentTarget.classList.add("on"); } }, l))));
+
+  const gb = (n) => (n / 1e9 >= 10 ? (n / 1e9).toFixed(0) : (n / 1e9).toFixed(2)) + " GB";
+  const storBody = h("div", {}, h("div", { class: "stat-line" }, "Measuring…"));
+  const storSec = h("section", { id: "sec-storage" }, h("h3", {}, "Storage"),
+    h("p", {}, "The database, previews and video stills always stay on this Mac, so browsing is instant. The originals (the big files) can live in Dropbox or on an external drive instead."),
+    storBody);
+  const moveTo = async (path, label) => {
+    const ok = await askConfirm(`Move originals to ${label}?`, {
+      text: "Stash moves them into a “Stash Media” folder there. On the same disk (like Dropbox) this takes moments, and Dropbox uploads in the background. Syncing waits until the move is done. If Stash closes partway, it finishes next time.",
+      label: "Move originals" });
+    if (!ok) return;
+    try {
+      await api("/api/storage/move", { method: "POST", body: { path } });
+      toast(`Moving originals to <b>${esc(label)}</b>`); pollJobs(true); setTimeout(loadStorage, 1500);
+    } catch (e) { toast(esc(e.message), { error: true }); }
+  };
+  const loadStorage = () => api("/api/storage?sizes=1").then((st) => {
+    const spec = (k, v) => [h("div", { class: "k" }, k), h("div", { class: "v" }, v)];
+    const where = st.candidates.find((c) => st.media_dir.startsWith(c.path.replace(/\/Stash Media$/, "")))?.label || (st.is_default ? "This Mac" : "Custom folder");
+    const others = st.candidates.filter((c) => c.path !== st.media_dir);
+    const custom = h("input", { placeholder: "/Volumes/Drive/Stash Media", style: "flex:1;min-width:200px" });
+    custom.addEventListener("keydown", (e) => e.stopPropagation());
+    fill(storBody,
+      h("div", { class: "spec", style: "margin:0 -16px 12px;border-top:1px solid var(--rule-soft)" },
+        ...spec("Originals", `${gb(st.originals)} / ${where}`),
+        ...spec("Folder", h("span", {}, st.media_dir, " ", DESKTOP ? h("button", { class: "link", style: "border:0;padding:0;text-decoration:underline;font:inherit;text-transform:none", onclick: () => api("/api/desktop/reveal", { method: "POST", body: { what: "originals" } }) }, "Show") : null)),
+        ...spec("On this Mac", `${gb(st.local)} / database + previews`)),
+      st.available ? null : h("p", { style: "color:var(--danger)" }, "That folder isn't reachable right now. Plug the drive in or check Dropbox is running. You can still browse; opening originals and syncing wait until it's back."),
+      st.moving_to ? h("p", { style: "color:var(--signal)" }, `Moving to ${st.moving_to}… progress shows under Status.`) : null,
+      others.length || !st.is_default ? h("div", { class: "row", style: "margin-bottom:10px" }, h("span", { class: "lbl", style: "margin-right:4px" }, "Move to"),
+        ...others.map((c) => h("button", { onclick: () => moveTo(c.path, c.label) }, c.label)),
+        st.is_default ? null : h("button", { onclick: () => moveTo(st.default_path, "this Mac") }, "This Mac")) : null,
+      h("div", { class: "row" }, custom, h("button", { onclick: () => custom.value.trim() && moveTo(custom.value.trim(), custom.value.trim()) }, "Move to folder")),
+      !st.is_default && /dropbox|google|icloud|onedrive/i.test(where)
+        ? h("p", { class: "hint", style: "margin-top:12px" }, "To free up space on this Mac: in Finder, right-click the Stash Media folder and choose Make online-only (Dropbox). Stash fetches an original from the cloud when you open it, which can take a few seconds the first time.")
+        : null);
+  }).catch((e) => fill(storBody, h("p", { class: "hint" }, esc(e.message))));
+  loadStorage();
 
   const libInfo = h("div", { class: "stat-line" }, "Checking library…");
   const libSec = h("section", {}, h("h3", {}, "Library"),
@@ -937,11 +975,11 @@ function renderDrawer(focus) {
 
   const aboutSec = h("section", {},
     h("h3", {}, "Where your files live"),
-    h("p", {}, "Everything is stored on this computer in ", h("code", {}, s._data_dir), ". Originals are in media, exports you make are in exports."),
+    h("p", {}, "Your library (database, previews, backups, exports) is in ", h("code", {}, s._data_dir), ". Where the originals live is set under Storage above."),
     DESKTOP ? h("button", { onclick: () => api("/api/desktop/reveal", { method: "POST", body: { what: "library" } }) }, "Show in Finder") : null,
     h("p", { class: "hint", style: "margin-top:14px" }, `Stash ${s._version || ""}`));
 
-  fill(body, statusSec, importSec, syncSec, appearSec, libSec, aboutSec);
+  fill(body, statusSec, importSec, syncSec, storSec, appearSec, libSec, aboutSec);
   renderJobs();
   if (focus) setTimeout(() => $(`#sec-${focus}`)?.scrollIntoView({ block: "start" }), 50);
 }
@@ -955,7 +993,7 @@ async function startJobs(kinds) {
 function renderJobs() {
   const list = $("#jobList");
   if (list) fill(list, ...S.jobs.slice(0, 5).map((j) => h("div", { class: "job" },
-    h("span", { class: "k" }, { sync: "Sync", backfill: "Backlog", upgrade: "Upgrade" }[j.kind] || j.kind),
+    h("span", { class: "k" }, { sync: "Sync", backfill: "Backlog", upgrade: "Upgrade", move: "Storage" }[j.kind] || j.kind),
     h("div", {},
       h("span", { class: "s-" + j.status }, j.message || j.status),
       j.status === "running" && j.total ? h("div", { class: "progress" }, h("div", { style: `width:${Math.round((j.done / j.total) * 100)}%` })) : null,

@@ -159,7 +159,7 @@ def nice_stem(r):
 def still(media_id, t: float):
     """Full-resolution PNG of a single video frame at time t (seconds)."""
     r = media_row(media_id)
-    src = db.MEDIA_DIR / r["path"]
+    src = db.media_path(r["path"])
     out = _export_path(f"{nice_stem(r)}_{t:.2f}s".replace(".", "-"), "png")
     # -ss after -i = frame-accurate (decodes up to t; fine for social-length clips)
     run([FFMPEG, "-y", "-v", "error", "-i", str(src), "-ss", f"{t:.3f}", "-frames:v", "1", str(out)])
@@ -169,7 +169,7 @@ def still(media_id, t: float):
 def shots(media_id, threshold=0.3):
     """Extract one full-res frame per detected shot (scene change). Returns a zip path."""
     r = media_row(media_id)
-    src = db.MEDIA_DIR / r["path"]
+    src = db.media_path(r["path"])
     work = db.EXPORT_DIR / f"shots_{uuid.uuid4().hex[:8]}"
     work.mkdir()
     # first frame + every frame where the scene changes
@@ -185,7 +185,7 @@ def shots(media_id, threshold=0.3):
 def clip(media_id, start: float, end: float, fmt="mp4", width=None, fps=None):
     """Export a section of a video as mp4 (high quality) or gif (palette-optimized)."""
     r = media_row(media_id)
-    src = db.MEDIA_DIR / r["path"]
+    src = db.media_path(r["path"])
     start = max(0.0, float(start))
     dur = max(0.1, float(end) - start)
     stem = f"{nice_stem(r)}_{start:.1f}-{start + dur:.1f}".replace(".", "-")
@@ -216,7 +216,7 @@ def post_zip(post_id):
     work = db.EXPORT_DIR / f"post_{uuid.uuid4().hex[:8]}"
     work.mkdir()
     for m in c.execute("SELECT idx, path FROM media WHERE post_id=? ORDER BY idx", (post_id,)):
-        src = db.MEDIA_DIR / m["path"]
+        src = db.media_path(m["path"])
         shutil.copy2(src, work / f"{m['idx'] + 1:02d}{src.suffix}")
     (work / "caption.txt").write_text(f"@{p['username']}\n{p['url']}\n\n{p['caption'] or ''}\n")
     zpath = _export_path(f"{p['username'] or 'ig'}_{p['shortcode']}", "zip")
@@ -263,7 +263,7 @@ def export_batch(post_ids, name, include_images=True, include_videos=True, metad
             for m in c.execute("SELECT idx, kind, path FROM media WHERE post_id=? ORDER BY idx", (pid,)):
                 if (m["kind"] == "video" and not include_videos) or (m["kind"] == "image" and not include_images):
                     continue
-                src = db.MEDIA_DIR / m["path"]
+                src = db.media_path(m["path"])
                 if not src.exists():
                     continue
                 arc = f"{_safe(p['username'], 'ig')}_{p['shortcode']}_{m['idx'] + 1}{src.suffix.lower()}"
@@ -294,7 +294,7 @@ def purge_posts(c, post_ids):
         p = c.execute("SELECT shortcode FROM posts WHERE id=?", (pid,)).fetchone()
         if not p:
             continue
-        for d in (db.MEDIA_DIR / p["shortcode"], db.THUMB_DIR / p["shortcode"]):
+        for d in [root / p["shortcode"] for root in db.media_roots()] + [db.THUMB_DIR / p["shortcode"]]:
             if d.exists():
                 freed += db.dir_size(d)
                 shutil.rmtree(d, ignore_errors=True)
@@ -309,12 +309,15 @@ def purge_posts(c, post_ids):
 def check_library():
     """Find media rows whose files vanished (moved/deleted outside the app) and queue those posts for
     re-download; rebuild missing thumbnails."""
+    if not db.media_available():
+        raise RuntimeError(f"Your originals folder isn't reachable right now ({db.MEDIA_DIR}). "
+                           "Plug the drive in or check Dropbox is running, then try again.")
     c = db.conn()
     missing_files = rebuilt = requeued = 0
     broken_posts = set()
     rows = c.execute("SELECT id, post_id, idx, path, thumb FROM media").fetchall()
     for r in rows:
-        src = db.MEDIA_DIR / r["path"]
+        src = db.media_path(r["path"])
         if not src.exists():
             broken_posts.add(r["post_id"])
             missing_files += 1

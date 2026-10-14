@@ -138,9 +138,9 @@ def analyze_media(c, media_id):
     r = c.execute("SELECT path, thumb, kind FROM media WHERE id=?", (media_id,)).fetchone()
     if not r:
         return
-    src = (db.THUMB_DIR / r["thumb"]) if r["thumb"] else (db.MEDIA_DIR / r["path"])
+    src = (db.THUMB_DIR / r["thumb"]) if r["thumb"] else (db.media_path(r["path"]))
     if r["kind"] == "image" and not r["thumb"]:
-        src = db.MEDIA_DIR / r["path"]
+        src = db.media_path(r["path"])
     res = analyze_file(src)
     c.execute(
         "INSERT OR REPLACE INTO analysis (media_id, palette, tone, sat, temp, contrast, ar, ar_label, crop, lum, chroma, vec, version) "
@@ -165,7 +165,7 @@ def _backfill_posters(batch=20):
         "SELECT m.id, m.path, m.idx, p.shortcode FROM media m JOIN posts p ON p.id=m.post_id "
         "WHERE m.kind='video' AND m.poster IS NULL LIMIT ?", (batch,)).fetchall()
     for r in rows:
-        src = db.MEDIA_DIR / r["path"]
+        src = db.media_path(r["path"])
         poster = media.make_poster(src, f"{r['shortcode']}/{r['idx']:02d}") if src.exists() else None
         with db.tx() as c:
             c.execute("UPDATE media SET poster=? WHERE id=?", (poster or "", r["id"]))

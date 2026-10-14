@@ -41,8 +41,13 @@ Instagram has no official API for saves, so there's always some risk of Instagra
 
 ## Where things live
 
-Everything stays on your Mac in your home folder under **Stash**: originals in `media`, exports in `exports`,
-daily database backups in `backups`, and a log in `stash.log`. Files you download from the app go to Downloads.
+Your library stays on your Mac in your home folder under **Stash**: the database, previews and video stills,
+daily backups in `backups`, exports in `exports`, and a log in `stash.log`. Files you download go to Downloads.
+
+The **originals** (the big files) can live elsewhere: Sync › **Storage** › Move to **Dropbox** (or Google Drive,
+iCloud Drive, an external drive). Then in Finder right-click the *Stash Media* folder › **Make online-only** to free
+the space; Stash fetches an original from the cloud when you open it. Browsing and search keep working even when the
+folder is offline.
 
 ---
 
