@@ -180,7 +180,10 @@ function setFilter(f, keepQuery = true) {
 // ---------------- sidebar ----------------
 async function loadSidebar() {
   api("/api/facets").then((f) => { S.facets = f; renderFilters(); }).catch(() => {});
-  api("/api/ai").then((a) => { S.aiOn = a.enabled && a.installed; }).catch(() => {});
+  api("/api/ai").then((a) => {
+    S.aiOn = a.enabled && a.installed;
+    $("#q").placeholder = S.aiOn ? "Search anything: flower, red neon, overhead table…" : "Captions, creators, tags, notes";
+  }).catch(() => {});
   S.side = await api("/api/sidebar");
   renderSidebar();
   fill($("#collectionList"), ...S.side.collections.map((c) => h("option", { value: c.name })));
@@ -273,6 +276,7 @@ function renderScope() {
   if (f.creator || f.tag) h1.style.textTransform = "none";
   const meta = [h("div", { class: "stat" }, h("span", { class: "lbl" }, "Posts"), h("b", {}, S.total != null ? pad(S.total) : "···"))];
   if (f.q) meta.push(h("div", { class: "stat" }, h("span", { class: "lbl" }, "Search"), h("b", {}, f.q)));
+  if (f.q && S.aiOn) meta.push(h("div", { class: "stat", title: "Looks at every image and about one frame a second of every video, plus captions" }, h("span", { class: "lbl" }, "Matching"), h("b", {}, "what's in the frame + captions")));
   if (f.simimg && S.queryImg) meta.unshift(h("img", { class: "query-img", src: S.queryImg, alt: "Your search image" }));
   if (f.similar || f.simimg) meta.push(h("div", { class: "stat" }, h("span", { class: "lbl" }, "Ranked by"), h("b", {}, "composition + color")));
   meta.push(h("span", { class: "spacer" }));
@@ -451,7 +455,10 @@ function tile(p, i, ratio) {
   const m = p.media[0] || {};
   const isVideo = m.kind === "video";
   const num = "[" + pad(i + 1, Math.max(3, String(S.total || 0).length)) + "]";
-  const box = h("span", { class: "box" }, m.thumb_src ? sharpImg(m) : null);
+  const hit = p.hit;
+  const box = h("span", { class: "box" }, m.thumb_src ? (m.hit_src ? h("img", { src: m.hit_src, loading: "lazy", decoding: "async", alt: "" }) : sharpImg(m)) : null);
+  if (hit && m.kind === "video" && hit.t >= 0.5) box.append(h("span", { class: "hitchip", title: "Where your search shows up" }, "▶ " + fmtTime(hit.t).replace(/\.\d\d$/, "")));
+  else if (hit && p.media_count > 1) box.append(h("span", { class: "hitchip" }, `${hit.idx + 1} / ${p.media_count}`));
   const el = h("button", { class: "tile" + (S.selected.has(p.id) ? " sel" : ""), "data-id": p.id, draggable: "true", "aria-label": `Post ${i + 1} by ${p.username || "unknown"}` }, box);
   if (S.view === "index") {
     el.append(h("span", { class: "cap" }, h("span", { class: "n" }, num), h("span", { class: "k" }, (p.favorite ? "★ " : "") + kindLabel(p))),
@@ -470,7 +477,9 @@ function tile(p, i, ratio) {
     el.addEventListener("mouseenter", () => {
       timer = setTimeout(() => {
         v = h("video", { src: m.src, muted: true, loop: true, playsinline: true, preload: "auto" });
-        v.muted = true; box.append(v); v.play().catch(() => {});
+        v.muted = true;
+        if (hit && hit.t >= 0.5) v.addEventListener("loadedmetadata", () => { v.currentTime = hit.t; }, { once: true });
+        box.append(v); v.play().catch(() => {});
       }, 180);
     });
     el.addEventListener("mouseleave", () => { clearTimeout(timer); if (v) { v.pause(); v.remove(); v = null; } });
@@ -608,7 +617,10 @@ function renderSelbar() {
 const V = { video: null };
 async function openViewer(i) {
   if (i < 0 || i >= S.items.length) return;
-  S.viewerIndex = i; S.slide = 0; S.inPt = S.outPt = null;
+  S.viewerIndex = i; S.inPt = S.outPt = null;
+  const hit = S.items[i].hit;
+  S.slide = hit ? hit.idx : 0;
+  S.seekTo = hit && hit.t >= 0.5 ? hit.t : null;
   $("#viewer").hidden = false; document.body.style.overflow = "hidden";
   const id = S.items[i].id;
   S.post = await api(`/api/posts/${id}`);
@@ -632,6 +644,7 @@ function renderStage() {
     v.addEventListener("click", togglePlay);
     v.addEventListener("timeupdate", updateDeck);
     v.addEventListener("loadedmetadata", updateDeck);
+    if (S.seekTo != null) { const t = S.seekTo; S.seekTo = null; v.addEventListener("loadedmetadata", () => { v.currentTime = t; }, { once: true }); }
     v.addEventListener("play", updateDeck); v.addEventListener("pause", updateDeck);
     fill(frame, v); V.video = v;
     v.play().catch(() => {});
@@ -989,22 +1002,22 @@ function renderDrawer(focus) {
   loadStorage();
 
   const aiBody = h("div", {}, h("div", { class: "stat-line" }, "…"));
-  const aiSec = h("section", { id: "sec-ai" }, h("h3", {}, "AI tags"),
-    h("p", {}, "Stash can tell what each save shows: real film frames, someone talking to camera, behind the scenes, gear, or text and graphics. Then use the Content filter, like “Not film frames” in your Cinematography collection. It runs entirely on this Mac. Turning it on downloads a 150 MB model once."),
+  const aiSec = h("section", { id: "sec-ai" }, h("h3", {}, "AI search & tags"),
+    h("p", {}, "Search for what's in your saves, not just their captions: “flower”, “red neon at night”, “overhead shot of a table”. Stash looks at every image and about one frame a second of every video, and video results open at the moment that matches. It also tags what each save is (film frame, talking to camera, behind the scenes, gear, text) for the Content filter. Everything runs on this Mac; turning it on downloads a 150 MB model once and scans your library in the background."),
     aiBody);
   let aiTimer;
   const loadAI = () => api("/api/ai").then((a) => {
     clearTimeout(aiTimer);
     S.aiOn = a.enabled && a.installed;
     const line = a.downloading ? `Downloading model… ${Math.round(a.progress * 100)}%`
-      : a.enabled && a.installed ? `Tagged ${a.tagged.toLocaleString()} of ${a.total.toLocaleString()} saves` + (a.tagged < a.total ? " (keeps going in the background)" : "")
+      : a.enabled && a.installed ? `Scanned ${a.scanned.toLocaleString()} of ${a.total.toLocaleString()} images and videos` + (a.scanned < a.total ? " (keeps going in the background, search improves as it goes)" : ". Search looks inside everything.")
       : "Off";
     fill(aiBody,
       h("div", { class: "stat-line" }, line),
       a.error ? h("p", { style: "color:var(--danger)" }, a.error) : null,
       a.enabled && (a.installed || a.downloading)
         ? h("button", { onclick: async () => { await api("/api/ai/toggle", { method: "POST", body: { enabled: false } }); loadAI(); } }, "Turn off")
-        : h("button", { class: "primary", onclick: async () => { await api("/api/ai/toggle", { method: "POST", body: { enabled: true } }); toast("Downloading the AI model"); loadAI(); } }, "Turn on AI tags"));
+        : h("button", { class: "primary", onclick: async () => { await api("/api/ai/toggle", { method: "POST", body: { enabled: true } }); toast("Downloading the AI model"); loadAI(); } }, "Turn on AI search"));
     if (!$("#drawer").hidden && (a.downloading || (a.enabled && a.installed && a.tagged < a.total))) aiTimer = setTimeout(loadAI, 3000);
   }).catch(() => fill(aiBody));
   loadAI();

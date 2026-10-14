@@ -113,6 +113,30 @@ def run(port):
             print(f"  (film frame with a gear caption -> {l3})", flush=True)
             if on_ci:
                 print(f"::notice title=AI tags::text card -> {l1}, film frame -> {l2}, film frame + gear caption -> {l3}", flush=True)
+            # visual search: the word FLOWER appears only between 0:02 and 0:04 of a 6 second video
+            plain = fim.resize((720, 1280))
+            word = Image.new("RGB", (720, 1280), (245, 240, 230)); wd = ImageDraw.Draw(word)
+            wd.text((60, 560), "FLOWER", fill=(20, 20, 20), font=ImageFont.load_default(size=150))
+            plain.save(tmp / "a.png"); word.save(tmp / "b.png")
+            vid = tmp / "hit.mp4"
+            subprocess.run([media.FFMPEG, "-v", "error", "-y", "-loop", "1", "-t", "2", "-i", str(tmp / "a.png"),
+                            "-loop", "1", "-t", "2", "-i", str(tmp / "b.png"), "-loop", "1", "-t", "2", "-i", str(tmp / "a.png"),
+                            "-filter_complex", "[0][1][2]concat=n=3:v=1:a=0,format=yuv420p", "-r", "10", str(vid)], check=True, timeout=120)
+            fdir = tmp / "frames"; fdir.mkdir()
+            frames = ai._video_frames(vid, 6.0, str(fdir))
+            tensors, times = [], []
+            for tt, im in frames:
+                for sq in ai._square_crops(im):
+                    tensors.append(ai._to_tensor(sq)); times.append(tt)
+            vecs = ai.embed_batch(tensors)
+            q = ai.embed_query("flower")
+            sims = vecs @ q
+            best_t = times[int(np.argmax(sims))]
+            check("AI search finds the moment in a video", 2.0 <= best_t < 4.0, f"best match at {best_t}s, frames {sorted(set(times))}")
+            sc_word, sc_film = float(ai.embed_image(tmp / "b.png") @ q), float(ai.embed_image(tmp / "film.jpg") @ q)
+            check("AI search ranks the matching image higher", sc_word > sc_film, f"{sc_word:.3f} vs {sc_film:.3f}")
+            if on_ci:
+                print(f"::notice title=AI search::'flower' best moment {best_t}s; image scores {sc_word:.3f} vs {sc_film:.3f}", flush=True)
         except Exception as e:
             import traceback
             check("AI tags", False, repr(e) + " " + traceback.format_exc()[-600:])

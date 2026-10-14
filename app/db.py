@@ -122,6 +122,13 @@ CREATE TABLE IF NOT EXISTS analysis (
     ar REAL, ar_label TEXT, crop TEXT, lum REAL, chroma REAL, vec BLOB, version INTEGER DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS analysis_filters ON analysis(tone, sat, temp, contrast, ar_label);
+CREATE TABLE IF NOT EXISTS frames (
+    id INTEGER PRIMARY KEY,
+    media_id INTEGER NOT NULL REFERENCES media(id) ON DELETE CASCADE,
+    t REAL NOT NULL,             -- seconds into the video (0 for images)
+    vec BLOB NOT NULL            -- CLIP embedding, float16
+);
+CREATE INDEX IF NOT EXISTS frames_media ON frames(media_id);
 CREATE TABLE IF NOT EXISTS jobs (
     id INTEGER PRIMARY KEY,
     kind TEXT, status TEXT, message TEXT,
@@ -167,7 +174,7 @@ def init():
         c.execute("CREATE INDEX IF NOT EXISTS posts_deleted ON posts(deleted_at)")
         acols = {r[1] for r in c.execute("PRAGMA table_info(analysis)")}
         for col, typ in (("content", "TEXT"), ("content_conf", "REAL"), ("clip", "BLOB"),
-                         ("ai_version", "INTEGER"), ("content_user", "TEXT")):
+                         ("ai_version", "INTEGER"), ("content_user", "TEXT"), ("scan_version", "INTEGER")):
             if col not in acols:
                 c.execute(f"ALTER TABLE analysis ADD COLUMN {col} {typ}")
         c.commit()

@@ -182,7 +182,7 @@ def _worker():
             if not ids:
                 from . import ai
                 try:
-                    tagged = ai.tag_batch()
+                    tagged = ai.work_batch()
                 except Exception:
                     traceback.print_exc()
                     tagged = 0

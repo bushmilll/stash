@@ -468,3 +468,6 @@ code { font-family: var(--mono); font-size: var(--fs-xs); background: var(--cell
 /* ---------- drop to search ---------- */
 .dropzone { position: fixed; inset: 0; z-index: 80; background: var(--scrim); display: grid; place-items: center; pointer-events: none; }
 .dropzone div { border: 2px dashed var(--paper); color: var(--paper); padding: 40px 56px; font-size: 22px; font-weight: 500; text-transform: uppercase; letter-spacing: -.01em; background: rgba(0,0,0,.4); }
+
+/* search: where the match is */
+.hitchip { position: absolute; left: 6px; top: 6px; z-index: 3; background: var(--signal); color: #000; font: 500 10px var(--mono); padding: 2px 5px; pointer-events: none; }

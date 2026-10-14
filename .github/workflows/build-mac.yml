@@ -48,7 +48,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/stash-test-model
-          key: clip-vit-b32-q-v1
+          key: clip-vit-b16-q-v1
 
       - name: Test the app before packaging
         run: STASH_SELFTEST=1 STASH_AI_TEST=1 STASH_MODEL_DIR="$HOME/stash-test-model" STASH_DATA="$RUNNER_TEMP/test-lib" STASH_PORT=8790 python stash_app.py

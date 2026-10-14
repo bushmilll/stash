@@ -6,6 +6,9 @@ living on your own Mac.
 
 - **Frames** view (justified rows, letterboxes trimmed) and a numbered **Index** view
 - **Filters** computed from the pixels: color, tone, saturation (incl. black & white), warm/cool, contrast, true aspect ratio
+- **AI search** (optional, on-device): type what you're looking for ("flower", "red neon at night") and Stash
+  finds it inside every image and video, opening videos at the moment it appears
+- **Content tags** (AI): film frames vs. talking to camera, behind the scenes, gear, text
 - **Similar shots**, **search by image** (drop any picture onto the window), the color **palette** of every frame
 - **Collections**, tags, notes, favorites; export any collection or selection as a zip with a spreadsheet of sources
 - **Moodboards**: Sheet (numbered catalog page), Columns or Rows; export PNG or PDF

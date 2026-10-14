@@ -2,6 +2,8 @@
 import json
 import os
 import re
+
+import numpy as np
 import sys
 import time
 from pathlib import Path
@@ -47,7 +49,10 @@ async def list_posts(request):
         if status != "all":
             where.append("p.status=?")
             args.append(status)
-    if qp.get("q"):
+    sem_q = None
+    if qp.get("q") and ai.ready() and ai._load_index()["mat"] is not None:
+        sem_q = qp["q"]          # visual search: ranked below, blended with caption matches
+    elif qp.get("q"):
         fq = fts_query(qp["q"])
         if fq:
             joins.append("JOIN search s ON s.rowid=p.id")
@@ -92,7 +97,24 @@ async def list_posts(request):
     offset = int(qp.get("offset", 0))
     # ranked searches: by color, by similarity to a post, or by an uploaded image
     ranked = None
-    if qp.get("similar"):
+    hits = {}
+    if sem_q:
+        res = await run_in_threadpool(ai.search, sem_q)
+        fq = fts_query(sem_q)
+        text_ids = {r[0] for r in db.conn().execute("SELECT rowid FROM search WHERE search MATCH ?", (fq,))} if fq else set()
+        scored = {}
+        for pid, s, idx, t in res:
+            scored[pid] = s + (0.03 if pid in text_ids else 0)
+            hits[pid] = (idx, t)
+        if res:
+            mid = float(np.median([s for _, s, _, _ in res]))
+            for pid in text_ids - set(scored):     # caption says it, pixels less sure: middle of the list
+                scored[pid] = mid
+        else:
+            for pid in text_ids:
+                scored[pid] = 0
+        ranked = [pid for pid, _ in sorted(scored.items(), key=lambda kv: -kv[1])]
+    elif qp.get("similar"):
         v = analyze.vec_for_post(int(qp["similar"]))
         ranked = analyze.nearest(v, exclude=int(qp["similar"]), k=300) if v is not None else []
     elif qp.get("simimg"):
@@ -121,7 +143,23 @@ async def list_posts(request):
         c = db.conn()
         page = ids[offset:offset + limit]
         rows = {r["id"]: r for r in c.execute(f"SELECT * FROM posts WHERE id IN ({','.join('?' * len(page))})", page)} if page else {}
-        items = [db.post_dict(c, rows[i]) for i in page if i in rows]
+        items = []
+        for i in page:
+            if i not in rows:
+                continue
+            if i in hits:   # show the item and the moment that matched the search
+                item = db.post_dict(c, rows[i], full=True)
+                idx, t = hits[i]
+                m_ = next((mm for mm in item["media"] if mm["idx"] == idx), item["media"][0] if item["media"] else None)
+                item["media_count"] = len(item["media"])
+                item["media"] = [m_] if m_ else []
+                if m_:
+                    item["hit"] = {"idx": idx, "t": t}
+                    if m_["kind"] == "video" and t >= 0.5:
+                        m_["hit_src"] = f"/api/media/{m_['id']}/frame?t={t:.2f}"
+                items.append(item)
+            else:
+                items.append(db.post_dict(c, rows[i]))
         return JSONResponse({"items": items, "more": offset + limit < len(ids), "total": len(ids) if offset == 0 else None})
     order = SORTS.get(qp.get("sort", "saved"), SORTS["saved"])
     if qp.get("sort") == "random" and qp.get("seed"):
@@ -511,6 +549,32 @@ async def ai_toggle(request):
     return JSONResponse(await run_in_threadpool(ai.status))
 
 
+async def media_frame(request):
+    """A full-res frame at time t (cached): what a search tile shows for the matched moment."""
+    try:
+        r = media.media_row(request.path_params["id"])
+    except FileNotFoundError:
+        raise HTTPException(404)
+    t = max(0.0, float(request.query_params.get("t", 0)))
+    out = db.THUMB_DIR / r["shortcode"] / f"{r['idx']:02d}_t{int(round(t * 10)):05d}.jpg"
+    if not out.exists():
+        src = db.media_path(r["path"])
+        if not src.exists():
+            fb = db.THUMB_DIR / (r["poster"] or r["thumb"] or "")
+            if fb.is_file():
+                return FileResponse(fb)
+            raise HTTPException(404)
+        def work():
+            out.parent.mkdir(parents=True, exist_ok=True)
+            media.run([media.FFMPEG, "-y", "-v", "error", "-ss", f"{t:.2f}", "-i", str(src), "-frames:v", "1",
+                       "-vf", "scale='min(1280,iw)':-2", "-q:v", "3", str(out)], timeout=120)
+        try:
+            await run_in_threadpool(work)
+        except RuntimeError:
+            raise HTTPException(404)
+    return FileResponse(out, headers={"Cache-Control": "max-age=86400"})
+
+
 async def set_content(request):
     """Correct an AI label by hand (wins over the model, survives re-tagging)."""
     mid = request.path_params["id"]
@@ -775,6 +839,11 @@ def create_app():
     db.init()
     sync.start()
     analyze.start()
+    ai.ensure_current_model()
+    if os.environ.get("STASH_FAKE_AI"):     # tests only: a stand-in model (see tests)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("fake_ai", os.environ["STASH_FAKE_AI"])
+        spec.loader.exec_module(importlib.util.module_from_spec(spec))
     routes = [
         Route("/", index),
         Route("/api/posts", list_posts),
@@ -807,6 +876,7 @@ def create_app():
         Route("/api/collections", create_collection, methods=["POST"]),
         Route("/api/collections/rename", rename_collection, methods=["POST"]),
         Route("/api/media/{id:int}/content", set_content, methods=["POST"]),
+        Route("/api/media/{id:int}/frame", media_frame),
         Route("/api/media/{id:int}/download", download_media),
         Route("/api/media/{id:int}/{action}", tool, methods=["POST"]),
         Route("/api/import", upload_export, methods=["POST"]),
