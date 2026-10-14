@@ -179,9 +179,10 @@ const Board = (() => {
       el.textContent = it.text;
       el.style.fontSize = it.size + "px"; el.style.color = textColor(it);
     } else {
-      const useFull = it.kind !== "video" && it.w * scale * (window.devicePixelRatio || 1) > 500;
+      const useFull = it.w * scale * (window.devicePixelRatio || 1) > 500;
+      const full = it.kind === "video" ? (it.poster_src || it.thumb_src) : it.src;
       el.append(h("div", { class: "img", style: it.fit ? `background:${cellColor()}` : "" },
-        h("img", { src: useFull ? it.src : (it.thumb_src || it.src), alt: "", draggable: "false", decoding: "async" })));
+        h("img", { src: useFull ? full : (it.thumb_src || full), alt: "", draggable: "false", decoding: "async" })));
       if (it.kind === "video") el.append(h("span", { class: "vbadge" }, "Video"));
       if (it.num) el.append(h("span", { class: "num", style: `color:${inkColor()}` }, numLabel(it)));
     }

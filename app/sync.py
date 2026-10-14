@@ -76,7 +76,7 @@ def _worker():
         _current.update(id=jid, cancel=False)
         _update(jid, status="running", message="Starting…")
         try:
-            fn = {"sync": run_sync, "backfill": run_backfill}[kind]
+            fn = {"sync": run_sync, "backfill": run_backfill, "upgrade": run_upgrade}[kind]
             msg = fn(jid)
             _update(jid, status="done", message=msg, finished=db.now())
         except Cancelled:
@@ -114,6 +114,7 @@ def _scheduler():
             if time.time() - last >= hours * 3600:
                 enqueue("sync")
                 enqueue("backfill")
+                enqueue("upgrade")
         except Exception:
             traceback.print_exc()
 
@@ -142,7 +143,7 @@ def _configure(s):
         cookies = [src]  # read the session straight from your browser
     gdl_config.set(("extractor",), "cookies", cookies)
     ig = ("extractor", "instagram")
-    gdl_config.set(ig, "videos", "merged")         # plain progressive mp4, no ytdl needed
+    gdl_config.set(ig, "videos", True)             # include the DASH manifest so we can take the best streams
     delay = s.get("request_delay") or [6, 12]
     gdl_config.set(ig, "sleep-request", [float(delay[0]), float(delay[1])])
 
@@ -201,25 +202,114 @@ def _download(url, dest, headers=None, tries=3):
     raise last or IOError("download failed")
 
 
-def _save_post(post, files, collection=None):
+# ---------- best-quality video (Instagram's DASH streams) ----------
+
+COMPAT = ("avc1", "avc3", "hvc1", "hev1")   # codecs every Mac plays natively
+
+
+def _dash_streams(manifest):
+    """Parse Instagram's DASH manifest -> (best video rep, best audio rep). Each rep: dict(url, w, h, bw, codecs)."""
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(manifest)
+    videos, audios = [], []
+    for aset in root.iter():
+        if not aset.tag.endswith("AdaptationSet"):
+            continue
+        a_mime = (aset.get("mimeType") or aset.get("contentType") or "")
+        for rep in aset:
+            if not rep.tag.endswith("Representation"):
+                continue
+            base = next((c.text for c in rep if c.tag.endswith("BaseURL") and c.text), None)
+            if not base:
+                continue
+            mime = rep.get("mimeType") or a_mime
+            r = {"url": base.strip(), "w": int(rep.get("width") or 0), "h": int(rep.get("height") or 0),
+                 "bw": int(rep.get("bandwidth") or 0), "codecs": (rep.get("codecs") or aset.get("codecs") or "").lower()}
+            if mime.startswith("video") or (r["w"] and r["h"]):
+                videos.append(r)
+            elif mime.startswith("audio") or "mp4a" in r["codecs"] or "opus" in r["codecs"]:
+                audios.append(r)
+    if not videos:
+        raise ValueError("no video streams in manifest")
+    best_v = max(videos, key=lambda r: (r["w"] * r["h"], r["codecs"].startswith(COMPAT), r["bw"]))
+    best_a = max(audios, key=lambda r: r["bw"]) if audios else None
+    return best_v, best_a
+
+
+def _download_dash(manifest, dest, headers=None):
+    """Download the sharpest video stream + best audio and combine them into one mp4 at dest."""
+    v, a = _dash_streams(manifest)
+    tmp_v = dest.with_name(dest.stem + ".v.part")
+    tmp_a = dest.with_name(dest.stem + ".a.part")
+    out = dest.with_name(dest.stem + ".mux.mp4")
+    try:
+        _download(v["url"], tmp_v, headers)
+        if a:
+            _download(a["url"], tmp_a, headers)
+        cmd = [media.FFMPEG, "-y", "-v", "error", "-i", str(tmp_v)] + (["-i", str(tmp_a)] if a else [])
+        cmd += ["-map", "0:v:0"] + (["-map", "1:a:0"] if a else [])
+        if v["codecs"].startswith(COMPAT):
+            cmd += ["-c", "copy"]
+        else:
+            # VP9 / AV1 only: convert to high-quality H.264 so it plays and exports everywhere
+            cmd += ["-c:v", "libx264", "-crf", "15", "-preset", "medium", "-pix_fmt", "yuv420p", "-c:a", "copy"]
+        cmd += ["-movflags", "+faststart", str(out)]
+        media.run(cmd, timeout=900)
+        out.replace(dest)
+    finally:
+        for p in (tmp_v, tmp_a, out):
+            p.unlink(missing_ok=True)
+    return v
+
+
+def _save_post(post, files, collection=None, upgrade=False):
     """post: gallery-dl metadata dict; files: [(url, filedict)]. Downloads media and records the post."""
     code = post.get("post_shortcode") or post.get("shortcode")
     if not code:
         return None
     folder = db.MEDIA_DIR / code
     folder.mkdir(parents=True, exist_ok=True)
-    saved = []
+    saved, best = [], set()
     for i, (url, f) in enumerate(files):
         _check_cancel()
-        if url.startswith("ytdl:"):
-            fb = f.get("_fallback") or ()
-            if not fb:
+        headers = f.get("_http_headers") or None
+        is_video = url.startswith("ytdl:") or bool(f.get("video_url"))
+        if upgrade and not is_video:
+            # upgrading only touches videos; keep the photo we already have
+            existing = sorted(folder.glob(f"{i + 1:02d}.*"))
+            if existing:
+                saved.append(existing[0])
                 continue
-            url = fb[0]
+        if url.startswith("ytdl:"):
+            dest = folder / f"{i + 1:02d}.mp4"
+            if dest.exists() and not upgrade:
+                saved.append(dest); best.add(i)
+                continue
+            try:
+                _download_dash(f["_ytdl_manifest_data"], dest, headers)
+                best.add(i)
+            except (Cancelled, StopSync):
+                raise
+            except Exception as e:
+                print(f"[stash] best-quality download failed for {code} #{i + 1}, using the standard file: {e}", flush=True)
+                fb = f.get("_fallback") or ()
+                if not fb:
+                    continue
+                tmp = dest.with_name(dest.stem + ".fb.mp4")
+                _download(fb[0], tmp, headers)
+                tmp.replace(dest)
+            saved.append(dest)
+            continue
         ext = (f.get("extension") or "jpg").lower()
         dest = folder / f"{i + 1:02d}.{ext}"
-        if not dest.exists():
-            _download(url, dest, f.get("_http_headers") or None)
+        if is_video and upgrade and dest.exists():
+            tmp = dest.with_name(dest.stem + ".new." + ext)
+            _download(url, tmp, headers)
+            tmp.replace(dest)
+        elif not dest.exists():
+            _download(url, dest, headers)
+        if is_video:
+            best.add(i)   # no DASH offered: the single file is the best Instagram has
         saved.append(dest)
 
     date = post.get("post_date") or post.get("date")
@@ -240,6 +330,9 @@ def _save_post(post, files, collection=None):
                   (post.get("description") or "", post.get("username") or "", posted_at, pid))
         for i, path in enumerate(saved):
             media.ingest_file(c, pid, code, i, path)
+            c.execute("UPDATE media SET hq=? WHERE post_id=? AND idx=?", (1 if i in best else (-1 if upgrade else 0), pid, i))
+            if upgrade:   # new file: redo the look analysis
+                c.execute("DELETE FROM analysis WHERE media_id=(SELECT id FROM media WHERE post_id=? AND idx=?)", (pid, i))
         media.refresh_post_kind(c, pid)
         if collection:
             db.add_to_collection(c, pid, collection, source="instagram")
@@ -331,6 +424,44 @@ def run_sync(jid):
     if failed_posts:
         msg += f", {failed_posts} couldn't be downloaded and will be retried"
     return msg
+
+
+def run_upgrade(jid):
+    """Re-download videos that were saved before Stash grabbed the best-quality streams."""
+    s = db.load_settings()
+    _configure(s)
+    limit = int(s.get("backfill_per_run") or 150)
+    rows = db.conn().execute(
+        "SELECT DISTINCT p.id, p.shortcode FROM posts p JOIN media m ON m.post_id=p.id "
+        "WHERE m.kind='video' AND COALESCE(m.hq,0)=0 AND p.status='ready' AND p.deleted_at IS NULL "
+        "ORDER BY COALESCE(p.saved_at,p.added_at) DESC LIMIT ?", (limit,)).fetchall()
+    if not rows:
+        return "All videos are already in the best quality Instagram offers"
+    delay = s.get("request_delay") or [6, 12]
+    ok = failed = 0
+    for i, r in enumerate(rows):
+        _check_cancel()
+        _update(jid, done=i, total=len(rows), message=f"Upgrading video {i + 1} of {len(rows)}")
+        try:
+            for post, files in _iter_posts(f"https://www.instagram.com/p/{r['shortcode']}/"):
+                _save_post(post, files, upgrade=True)
+            ok += 1
+        except (Cancelled, StopSync):
+            raise
+        except Exception as e:
+            msg = _friendly(e)
+            if _blocking(msg):
+                raise StopSync(msg)
+            failed += 1
+            with db.tx() as c:   # don't keep retrying a post that's gone or broken
+                c.execute("UPDATE media SET hq=-1 WHERE post_id=? AND kind='video'", (r["id"],))
+        for _ in range(int(random.uniform(float(delay[0]), float(delay[1])) * 2)):
+            _check_cancel()
+            time.sleep(0.5)
+    left = db.conn().execute(
+        "SELECT COUNT(DISTINCT m.post_id) FROM media m JOIN posts p ON p.id=m.post_id "
+        "WHERE m.kind='video' AND COALESCE(m.hq,0)=0 AND p.status='ready' AND p.deleted_at IS NULL").fetchone()[0]
+    return f"Upgraded {ok} video post(s) to best quality" + (f", {failed} unavailable" if failed else "") + (f" · {left} to go" if left else "")
 
 
 def run_backfill(jid):

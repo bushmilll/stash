@@ -376,8 +376,9 @@ function framesFlush(final) {
 }
 function frameRow(items, rh) {
   return h("div", { class: "frow", style: `height:${rh}px` }, ...items.map(([p, i]) => {
-    const el = tile(p, i);
-    el.style.width = aspectOf(p) * rh + "px"; el.style.height = rh + "px";
+    const el = tile(p, i), w = aspectOf(p) * rh;
+    el.style.width = w + "px"; el.style.height = rh + "px";
+    const img = el.querySelector("img"); if (img) img.sizes = Math.ceil(w) + "px";
     return el;
   }));
 }
@@ -394,13 +395,15 @@ function layout(reset) {
   }
   if (S.view === "index") {
     grid.style.setProperty("--cols", n);
-    if (reset) { fill(grid); cols = []; S.items.forEach((p, i) => grid.append(tile(p, i))); }
+    if (reset) { fill(grid); cols = []; S.items.forEach((p, i) => place(p, i)); }
     return;
   }
 }
 function place(p, i) {
   if (S.view === "frames") return fr.pending.push([p, i]);
-  $("#grid").append(tile(p, i));
+  const el = tile(p, i), img = el.querySelector("img");
+  if (img) img.sizes = Math.ceil(($("#grid").clientWidth || 1200) / colCount()) + "px";
+  $("#grid").append(el);
 }
 function kindLabel(p) {
   const m = p.media[0] || {};
@@ -408,11 +411,19 @@ function kindLabel(p) {
   if (p.media_count > 1) return p.media_count + " img";
   return m.width ? `${m.width}×${m.height}` : "";
 }
+// small preview for small tiles, the full-res file when the tile (or a Retina screen) needs more pixels
+function sharpImg(m, sizes = "420px") {
+  const full = m.kind === "video" ? m.poster_src : m.src;
+  const fullW = m.width || 1080;
+  const attrs = { src: m.thumb_src, loading: "lazy", decoding: "async", alt: "", sizes };
+  if (full && fullW > 560) attrs.srcset = `${m.thumb_src} 520w, ${full} ${fullW}w`;
+  return h("img", attrs);
+}
 function tile(p, i, ratio) {
   const m = p.media[0] || {};
   const isVideo = m.kind === "video";
   const num = "[" + pad(i + 1, Math.max(3, String(S.total || 0).length)) + "]";
-  const box = h("span", { class: "box" }, m.thumb_src ? h("img", { src: m.thumb_src, loading: "lazy", decoding: "async", alt: "" }) : null);
+  const box = h("span", { class: "box" }, m.thumb_src ? sharpImg(m) : null);
   const el = h("button", { class: "tile" + (S.selected.has(p.id) ? " sel" : ""), "data-id": p.id, draggable: "true", "aria-label": `Post ${i + 1} by ${p.username || "unknown"}` }, box);
   if (S.view === "index") {
     el.append(h("span", { class: "cap" }, h("span", { class: "n" }, num), h("span", { class: "k" }, (p.favorite ? "★ " : "") + kindLabel(p))),
@@ -589,7 +600,7 @@ function renderStage() {
   V.video = null;
   if (!m) { fill(frame, h("p", { class: "hint" }, "Media hasn't downloaded yet. It'll appear after the next sync.")); $("#deck").hidden = true; fill($("#slides"), ); return; }
   if (m.kind === "video") {
-    const v = h("video", { src: m.src, playsinline: true, loop: true, preload: "auto" });
+    const v = h("video", { src: m.src, poster: m.poster_src || m.thumb_src, playsinline: true, loop: true, preload: "auto" });
     v.addEventListener("click", togglePlay);
     v.addEventListener("timeupdate", updateDeck);
     v.addEventListener("loadedmetadata", updateDeck);
@@ -805,6 +816,7 @@ function renderDrawer(focus) {
     h("div", { class: "row" }, runBtn,
       h("button", { onclick: () => startJobs(["sync"]) }, "Check for new saves only"),
       c.pending ? h("button", { onclick: () => startJobs(["backfill"]) }, "Fetch waiting media") : null,
+      c.lowq ? h("button", { onclick: () => startJobs(["upgrade"]), title: "Re-download videos saved in lower quality, slowly in the background" }, `Upgrade ${c.lowq} videos to best quality`) : null,
       h("button", { class: "danger", onclick: () => api("/api/jobs", { method: "POST", body: { action: "cancel" } }).then(() => toast("Stopping after the current post")) }, "Stop")),
     h("div", { class: "jobs", id: "jobList", style: "margin-top:14px" }));
   if (!s._gallery_dl) statusSec.append(h("p", { style: "color:var(--danger)" }, "The sync engine is missing from this copy of Stash. Download the latest version and replace the app."));
@@ -943,7 +955,7 @@ async function startJobs(kinds) {
 function renderJobs() {
   const list = $("#jobList");
   if (list) fill(list, ...S.jobs.slice(0, 5).map((j) => h("div", { class: "job" },
-    h("span", { class: "k" }, j.kind === "sync" ? "Sync" : "Backlog"),
+    h("span", { class: "k" }, { sync: "Sync", backfill: "Backlog", upgrade: "Upgrade" }[j.kind] || j.kind),
     h("div", {},
       h("span", { class: "s-" + j.status }, j.message || j.status),
       j.status === "running" && j.total ? h("div", { class: "progress" }, h("div", { style: `width:${Math.round((j.done / j.total) * 100)}%` })) : null,

@@ -118,6 +118,11 @@ def init():
         cols = {r[1] for r in c.execute("PRAGMA table_info(posts)")}
         if "deleted_at" not in cols:
             c.execute("ALTER TABLE posts ADD COLUMN deleted_at INTEGER")
+        mcols = {r[1] for r in c.execute("PRAGMA table_info(media)")}
+        if "poster" not in mcols:
+            c.execute("ALTER TABLE media ADD COLUMN poster TEXT")      # full-res still for videos
+        if "hq" not in mcols:
+            c.execute("ALTER TABLE media ADD COLUMN hq INTEGER DEFAULT 0")  # 1 = best quality Instagram offers
         c.execute("CREATE INDEX IF NOT EXISTS posts_deleted ON posts(deleted_at)")
         c.commit()
 
@@ -210,13 +215,14 @@ def reindex(c, post_id):
 def post_dict(c, row, full=False):
     d = dict(row)
     media = [dict(m) for m in c.execute(
-        "SELECT m.id, m.idx, m.kind, m.path, m.thumb, m.width, m.height, m.duration, "
+        "SELECT m.id, m.idx, m.kind, m.path, m.thumb, m.poster, m.width, m.height, m.duration, m.hq, "
         "a.palette, a.tone, a.sat, a.temp, a.contrast, a.ar, a.ar_label, a.crop "
         "FROM media m LEFT JOIN analysis a ON a.media_id=m.id WHERE m.post_id=? ORDER BY m.idx",
         (row["id"],))]
     for m in media:
         m["src"] = "/files/media/" + m["path"]
         m["thumb_src"] = "/files/thumbs/" + m["thumb"] if m["thumb"] else None
+        m["poster_src"] = "/files/thumbs/" + m["poster"] if m.get("poster") else None
         for k in ("palette", "crop"):
             try:
                 m[k] = json.loads(m[k]) if m[k] else None

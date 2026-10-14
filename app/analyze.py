@@ -158,10 +158,24 @@ def pending(limit=200):
         "WHERE a.media_id IS NULL OR a.version < ? LIMIT ?", (VERSION, limit))]
 
 
+def _backfill_posters(batch=20):
+    """Videos saved by older versions only have a small thumbnail: make their full-res posters."""
+    from . import media
+    rows = db.conn().execute(
+        "SELECT m.id, m.path, m.idx, p.shortcode FROM media m JOIN posts p ON p.id=m.post_id "
+        "WHERE m.kind='video' AND m.poster IS NULL LIMIT ?", (batch,)).fetchall()
+    for r in rows:
+        src = db.MEDIA_DIR / r["path"]
+        poster = media.make_poster(src, f"{r['shortcode']}/{r['idx']:02d}") if src.exists() else None
+        with db.tx() as c:
+            c.execute("UPDATE media SET poster=? WHERE id=?", (poster or "", r["id"]))
+
+
 def _worker():
     """Analyze anything new in the background: on startup (whole backlog), and after each sync adds media."""
     while True:
         try:
+            _backfill_posters()
             ids = pending()
             if not ids:
                 time.sleep(20)

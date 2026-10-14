@@ -97,6 +97,22 @@ def make_thumb(src: Path, name: str):
     return out.relative_to(db.THUMB_DIR).as_posix()
 
 
+def make_poster(src: Path, name: str):
+    """Full-resolution still for a video (what the grid shows when tiles are big or the screen is Retina)."""
+    out = db.THUMB_DIR / f"{name}_poster.jpg"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.with_suffix(".tmp.jpg")
+    for seek in (["-ss", "0.8"], []):   # very short clips: fall back to the first frame
+        try:
+            run([FFMPEG, "-y", "-v", "error", *seek, "-i", str(src), "-frames:v", "1",
+                 "-vf", "scale='min(1920,iw)':-2", "-q:v", "2", str(tmp)], timeout=120)
+            tmp.replace(out)
+            return out.relative_to(db.THUMB_DIR).as_posix()
+        except RuntimeError:
+            continue
+    return None
+
+
 def ingest_file(c, post_id, shortcode, idx, path: Path):
     """Register a downloaded media file (already inside MEDIA_DIR) for a post."""
     k = kind_of(path)
@@ -104,12 +120,13 @@ def ingest_file(c, post_id, shortcode, idx, path: Path):
         return
     w, h, dur = probe(path)
     thumb = make_thumb(path, f"{shortcode}/{idx:02d}")
+    poster = make_poster(path, f"{shortcode}/{idx:02d}") if k == "video" else None
     rel = path.relative_to(db.MEDIA_DIR).as_posix()
     c.execute(
-        "INSERT INTO media (post_id, idx, kind, path, thumb, width, height, duration) VALUES (?,?,?,?,?,?,?,?) "
+        "INSERT INTO media (post_id, idx, kind, path, thumb, poster, width, height, duration) VALUES (?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(post_id, idx) DO UPDATE SET kind=excluded.kind, path=excluded.path, thumb=excluded.thumb, "
-        "width=excluded.width, height=excluded.height, duration=excluded.duration",
-        (post_id, idx, k, rel, thumb, w, h, dur))
+        "poster=excluded.poster, width=excluded.width, height=excluded.height, duration=excluded.duration",
+        (post_id, idx, k, rel, thumb, poster, w, h, dur))
 
 
 def refresh_post_kind(c, post_id):

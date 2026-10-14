@@ -203,6 +203,8 @@ async def sidebar(request):
         "SELECT 'gone', COUNT(*) FROM posts WHERE status='gone' AND deleted_at IS NULL UNION ALL "
         "SELECT 'favorite', COUNT(*) FROM posts WHERE status='ready' AND deleted_at IS NULL AND favorite=1 UNION ALL "
         "SELECT 'trash', COUNT(*) FROM posts WHERE deleted_at IS NOT NULL AND status!='removed' UNION ALL "
+        "SELECT 'lowq', COUNT(DISTINCT m.post_id) FROM media m JOIN posts p ON p.id=m.post_id WHERE m.kind='video' "
+        "AND COALESCE(m.hq,0)=0 AND p.status='ready' AND p.deleted_at IS NULL UNION ALL "
         "SELECT 'uncollected', COUNT(*) FROM posts WHERE status='ready' AND deleted_at IS NULL AND id NOT IN "
         "(SELECT post_id FROM post_collections)").fetchall())
     boards = [dict(r) for r in c.execute(
@@ -338,7 +340,7 @@ async def jobs(request):
             sync.cancel()
             return JSONResponse({"ok": True})
         kinds = body.get("kinds") or ["sync"]
-        return JSONResponse({"ids": [sync.enqueue(k) for k in kinds if k in ("sync", "backfill")]})
+        return JSONResponse({"ids": [sync.enqueue(k) for k in kinds if k in ("sync", "backfill", "upgrade")]})
     rows = db.conn().execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 8").fetchall()
     return JSONResponse([dict(r) for r in rows])
 
@@ -550,13 +552,14 @@ def _board_items(c, raw):
         if it.get("type") == "text":
             out.append(it)
             continue
-        m = c.execute("SELECT m.id, m.kind, m.path, m.thumb, m.width, m.height, p.username, p.shortcode, p.caption, p.id AS post_id "
+        m = c.execute("SELECT m.id, m.kind, m.path, m.thumb, m.poster, m.width, m.height, p.username, p.shortcode, p.caption, p.id AS post_id "
                       "FROM media m JOIN posts p ON p.id=m.post_id WHERE m.id=? AND p.deleted_at IS NULL "
                       "AND p.status!='removed'", (it.get("media_id"),)).fetchone()
         if not m:
             continue
         it = dict(it, type="media", kind=m["kind"], src="/files/media/" + m["path"],
                   thumb_src="/files/thumbs/" + m["thumb"] if m["thumb"] else None,
+                  poster_src="/files/thumbs/" + m["poster"] if m["poster"] else None,
                   mw=m["width"], mh=m["height"], username=m["username"], shortcode=m["shortcode"], post_id=m["post_id"],
                   caption=(m["caption"] or "")[:200])
         out.append(it)

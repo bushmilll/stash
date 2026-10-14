@@ -56,6 +56,22 @@ def run(port):
         check("gif export", out.returncode == 0 and (tmp / "t.gif").exists())
         out = subprocess.run([media.FFMPEG, "-v", "error", "-y", "-i", str(vid), "-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(tmp / "c.mp4")], timeout=120)
         check("mp4 export (x264)", out.returncode == 0)
+        # Instagram video formats: each must decode to a real (not black) frame and full-res poster
+        import numpy as np
+        from PIL import Image
+        fixtures = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
+        if not fixtures.exists():
+            fixtures = Path.cwd() / "tests" / "fixtures"
+        for f in sorted(fixtures.glob("*.mp4")):
+            png = tmp / (f.stem + ".png")
+            subprocess.run([media.FFMPEG, "-y", "-v", "error", "-i", str(f), "-ss", "1.000", "-frames:v", "1", str(png)], timeout=120)
+            ok = png.exists()
+            if ok:
+                a = np.asarray(Image.open(png).convert("L"), dtype=np.float32)
+                ok = a.mean() > 20 and a.std() > 10
+            check(f"grab frame from {f.stem}", ok, "" if ok else "blank or unreadable")
+            poster = media.make_poster(f, f"selftest/{f.stem}")
+            check(f"poster from {f.stem}", bool(poster))
     except Exception as e:
         check("media pipeline", False, repr(e))
 
