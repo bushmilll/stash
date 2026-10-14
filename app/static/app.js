@@ -1,0 +1,1046 @@
+/* Stash front end: plain JS, no build step. */
+const $ = (s, el = document) => el.querySelector(s);
+const h = (tag, attrs = {}, ...kids) => {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v == null || v === false) continue;
+    if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (k === "html") el.innerHTML = v;
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid.nodeType ? kid : String(kid));
+  return el;
+};
+const fill = (el, ...kids) => el.replaceChildren(...kids.flat().filter((k) => k != null && k !== false));
+const api = async (url, opts = {}) => {
+  const isForm = opts.body instanceof FormData || opts.body instanceof Blob;
+  let res;
+  try {
+    res = await fetch(url, {
+      ...opts,
+      headers: opts.body && !isForm ? { "Content-Type": "application/json" } : opts.headers,
+      body: opts.body && !isForm ? JSON.stringify(opts.body) : opts.body,
+    });
+  } catch {
+    throw new Error("Can't reach Stash. Make sure the app is still running.");
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+  return data;
+};
+const icon = (d, extra = "") => `<svg viewBox="0 0 20 20" ${extra}>${d}</svg>`;
+const ICON = {
+  video: '<path d="M6 4.5v11l9-5.5z" fill="currentColor" stroke="none"/>',
+  stack: '<rect x="3" y="6" width="11" height="11" rx="1"/><path d="M6 3h10a1 1 0 0 1 1 1v10"/>',
+  star: '<path d="m10 2.8 2.2 4.6 5 .6-3.7 3.4 1 5-4.5-2.5-4.5 2.5 1-5L2.8 8l5-.6z"/>',
+  pause: '<path d="M7 4v12M13 4v12" stroke-width="2.4"/>',
+  play: '<path d="M6 4v12l10-6z"/>',
+};
+const fmtTime = (s) => {
+  if (s == null || isNaN(s)) return "–";
+  const m = Math.floor(s / 60), sec = s - m * 60;
+  return `${String(m).padStart(2, "0")}:${sec.toFixed(2).padStart(5, "0")}`;
+};
+const fmtDate = (ts) => ts ? new Date(ts * 1000).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : null;
+const pad = (n, w = 3) => String(n ?? 0).padStart(w, "0");
+const fmtDay = (ts) => ts ? new Date(ts * 1000).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }).toUpperCase() : "–";
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function toast(msg, opts = {}) {
+  const t = h("div", { class: "toast" + (opts.error ? " err" : "") });
+  t.append(h("span", { html: msg }));
+  if (opts.action) t.append(h("button", { class: "ghost", style: "color:inherit;padding:2px 8px", onclick: () => { t.remove(); opts.action.fn(); } }, opts.action.label));
+  $("#toasts").append(t);
+  setTimeout(() => t.remove(), opts.ms || (opts.error ? 7000 : opts.action ? 9000 : 4500));
+  return t;
+}
+
+// ---------------- theme ----------------
+const THEME_ICON = {
+  auto: '<circle cx="10" cy="10" r="6.5"/><path d="M10 3.5v13a6.5 6.5 0 0 0 0-13z" fill="currentColor"/>',
+  light: '<circle cx="10" cy="10" r="3.5"/><path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M4.7 15.3l1.4-1.4M13.9 6.1l1.4-1.4"/>',
+  dark: '<path d="M16 11.5A6.5 6.5 0 0 1 8.5 4a6.5 6.5 0 1 0 7.5 7.5z"/>',
+};
+function getTheme() { try { return localStorage.getItem("sf-theme") || "auto"; } catch { return "auto"; } }
+function applyTheme(t) {
+  const r = document.documentElement;
+  if (t === "auto") delete r.dataset.theme; else r.dataset.theme = t;
+  try { localStorage.setItem("sf-theme", t); } catch {}
+  const b = $("#themeBtn");
+  b.textContent = { auto: "Auto", light: "Light", dark: "Dark" }[t];
+  b.title = "Theme. Click to switch between Auto (match your Mac), Light and Dark.";
+}
+
+// ---------------- modal ----------------
+function modal({ title, text, body, actions }) {
+  const close = () => { scrim.remove(); document.removeEventListener("keydown", onKey, true); };
+  const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); close(); } };
+  const scrim = h("div", { class: "modal-scrim", onclick: (e) => { if (e.target === scrim) close(); } },
+    h("div", { class: "modal", role: "dialog", "aria-label": title },
+      h("h2", {}, title), text ? h("p", {}, text) : null, body ? h("div", { class: "body" }, body) : null,
+      h("div", { class: "row" }, ...actions.map((a) => h("button", { class: a.primary ? "primary" : a.danger ? "danger" : "ghost", onclick: () => a.fn(close, scrim) }, a.label)))));
+  $("#modalRoot").append(scrim);
+  document.addEventListener("keydown", onKey, true);
+  scrim.querySelector("button.primary, button.danger")?.focus();
+  return close;
+}
+// in-app dialogs (the Mac app window has no browser pop-ups)
+function askText(title, { text, value = "", label = "Save" } = {}) {
+  return new Promise((resolve) => {
+    const input = h("input", { value, style: "width:100%;font-size:15px" });
+    let done = false;
+    const finish = (v, close) => { if (done) return; done = true; close(); resolve(v); };
+    const close = modal({ title, text, body: input, actions: [
+      { label: "Cancel", fn: (c) => finish(null, c) },
+      { label, primary: true, fn: (c) => finish(input.value.trim() || null, c) },
+    ] });
+    input.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Enter") finish(input.value.trim() || null, close); if (e.key === "Escape") finish(null, close); });
+    setTimeout(() => { input.focus(); input.select(); }, 30);
+  });
+}
+function askConfirm(title, { text, label = "OK", danger = false } = {}) {
+  return new Promise((resolve) => modal({ title, text, actions: [
+    { label: "Cancel", fn: (c) => { c(); resolve(false); } },
+    { label, primary: !danger, danger, fn: (c) => { c(); resolve(true); } },
+  ] }));
+}
+const DESKTOP = new URLSearchParams(location.search).has("app");
+function openExternal(url) {
+  if (DESKTOP) api("/api/desktop/open-url", { method: "POST", body: { url } }).catch((e) => toast(esc(e.message), { error: true }));
+  else window.open(url, "_blank", "noopener");
+}
+function savedToast(r) {
+  toast(`Saved <b>${esc(r.name)}</b> to Downloads`, { action: { label: "Show in Finder", fn: () => api("/api/desktop/reveal", { method: "POST", body: { path: r.path } }) } });
+}
+
+function exportDialog({ ids, collection, name, count }) {
+  const chk = (label, on = true) => { const i = h("input", { type: "checkbox", checked: on }); return [i, h("label", { class: "check" }, i, label)]; };
+  const [img, imgL] = chk("Photos"), [vid, vidL] = chk("Videos"), [meta, metaL] = chk("Spreadsheet of creators, links and captions");
+  modal({
+    title: `Export ${collection ? "“" + collection + "”" : count ? count + " posts" : "selection"}`,
+    text: "Saves the original files, full quality, into one zip.",
+    body: h("div", {}, imgL, vidL, metaL),
+    actions: [
+      { label: "Cancel", fn: (close) => close() },
+      { label: "Export zip", primary: true, fn: async (close, scrim) => {
+        const btn = scrim.querySelector("button.primary");
+        btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Preparing…';
+        try {
+          const r = await api("/api/export", { method: "POST", body: { ids, collection, name, images: img.checked, videos: vid.checked, metadata: meta.checked } });
+          downloadUrl(r.url);
+          if (!DESKTOP) toast(`Exported ${r.files} files (${(r.size / 1048576).toFixed(0)} MB) to <b>${esc(r.name)}</b>`);
+          close();
+        } catch (e) { toast(esc(e.message), { error: true }); btn.disabled = false; btn.textContent = "Export zip"; }
+      } },
+    ],
+  });
+}
+
+// ---------------- state ----------------
+const S = {
+  filter: {}, sort: "saved", seed: Math.floor(Math.random() * 1e6),
+  items: [], offset: 0, more: true, loading: false, total: null, gen: 0,
+  selected: new Set(), side: null, viewerIndex: -1, post: null, slide: 0,
+  inPt: null, outPt: null, settings: null, jobs: [], view: "frames", facets: null, queryImg: null,
+};
+const NAV_KEYS = ["collection", "tag", "creator", "kind", "favorite", "uncollected", "status", "trashed"];
+const LOOK_KEYS = ["color", "tone", "sat", "temp", "contrast", "ar"];
+const RANK_KEYS = ["similar", "simimg"];
+const LOOK = {
+  tone: ["Tone", [["low", "Low key"], ["mid", "Mid key"], ["high", "High key"]]],
+  sat: ["Saturation", [["saturated", "Saturated"], ["muted", "Muted"], ["bw", "Black & white"]]],
+  temp: ["Temperature", [["warm", "Warm"], ["neutral", "Neutral"], ["cool", "Cool"]]],
+  contrast: ["Contrast", [["high", "High"], ["normal", "Normal"], ["low", "Low"]]],
+  ar: ["Aspect", ["2.39:1", "2.20:1", "2:1", "1.85:1", "16:9", "3:2", "4:3", "5:4", "1:1", "4:5", "2:3", "9:16"].map((a) => [a, a])],
+};
+const SWATCHES = ["#c8102e", "#ff5a1f", "#f2b134", "#e9dcb8", "#5a8f3c", "#1fb5ad", "#1d4ed8", "#6d28d9", "#e64fb5", "#7a4b2a", "#ffffff", "#000000"];
+
+function readHash() {
+  const p = new URLSearchParams(location.hash.slice(1));
+  S.filter = {};
+  for (const k of ["q", ...NAV_KEYS, ...LOOK_KEYS, ...RANK_KEYS]) if (p.get(k)) S.filter[k] = p.get(k);
+  $("#q").value = S.filter.q || "";
+}
+function writeHash() {
+  const p = new URLSearchParams(S.filter);
+  history.replaceState(null, "", "#" + p.toString());
+}
+function setFilter(f, keepQuery = true) {
+  // switching what you're looking at keeps the search box and the look filters
+  const keep = Object.fromEntries(Object.entries(S.filter).filter(([k]) => LOOK_KEYS.includes(k) || (keepQuery && k === "q")));
+  S.filter = { ...keep, ...f };
+  for (const k in S.filter) if (!S.filter[k]) delete S.filter[k];
+  writeHash();
+  clearSelection();
+  $("#side").classList.remove("open");
+  reload();
+}
+
+// ---------------- sidebar ----------------
+async function loadSidebar() {
+  api("/api/facets").then((f) => { S.facets = f; renderFilters(); }).catch(() => {});
+  S.side = await api("/api/sidebar");
+  renderSidebar();
+  fill($("#collectionList"), ...S.side.collections.map((c) => h("option", { value: c.name })));
+}
+function updateFilter(patch) {
+  S.filter = { ...S.filter, ...patch };
+  for (const k in S.filter) if (!S.filter[k]) delete S.filter[k];
+  writeHash(); clearSelection(); reload();
+}
+function navItem(label, n, f, extra = {}, cls = "") {
+  const on = JSON.stringify(f) === JSON.stringify(Object.fromEntries(Object.entries(S.filter).filter(([k]) => NAV_KEYS.includes(k))));
+  return h("button", { class: "nav-item " + cls + (on ? " on" : ""), onclick: () => setFilter(f), ...extra },
+    h("span", { class: "label" }, label), n != null ? h("span", { class: "n" }, pad(n)) : null);
+}
+function renderSidebar() {
+  const sd = S.side; if (!sd) return;
+  const c = sd.counts;
+  const tagsShown = S.showAllTags ? sd.tags : sd.tags.slice(0, 30);
+  fill($("#nav"),
+    h("h3", { style: "margin-top:0;border-top:0" }, "Library"),
+    navItem("Everything", c.ready, {}),
+    navItem("Favorites", c.favorite, { favorite: "1" }),
+    navItem("Videos", null, { kind: "video" }),
+    navItem("Images", null, { kind: "image" }),
+    navItem("Not in a collection", c.uncollected, { uncollected: "1" }),
+    c.pending ? navItem("Waiting for media", c.pending, { status: "pending" }) : null,
+    c.gone ? navItem("No longer on Instagram", c.gone, { status: "gone" }) : null,
+    c.trash ? navItem("Trash", c.trash, { trashed: "1" }) : null,
+    h("h3", {}, "Collections", h("button", { title: "New collection", "aria-label": "New collection", onclick: newCollection }, "+")),
+    ...sd.collections.map((col) => {
+      const el = navItem(col.name, col.n, { collection: col.name }, { title: col.source === "instagram" ? "From Instagram" : "Your collection" });
+      el.addEventListener("dragover", (e) => { e.preventDefault(); el.classList.add("drop"); });
+      el.addEventListener("dragleave", () => el.classList.remove("drop"));
+      el.addEventListener("drop", (e) => { e.preventDefault(); el.classList.remove("drop"); dropInto(col.name, e); });
+      return el;
+    }),
+    sd.collections.length ? null : h("p", { class: "hint", style: "padding:8px 16px" }, "Collections from Instagram show up here after you import or sync."),
+    h("h3", {}, "Moodboards", h("button", { title: "New moodboard", "aria-label": "New moodboard", onclick: () => Board.create() }, "+")),
+    ...(sd.boards || []).map((b) => h("button", { class: "nav-item board-link", onclick: () => Board.open(b.id) },
+      h("span", { class: "label" }, b.name), h("span", { class: "n" }, pad(b.n)))),
+    sd.creators.length ? h("h3", {}, "Creators") : null,
+    ...sd.creators.slice(0, S.showAllCreators ? 40 : 8).map((cr) => navItem("@" + cr.name, cr.n, { creator: cr.name }, {}, "handle")),
+    sd.creators.length > 8 ? h("button", { class: "more-link", onclick: () => { S.showAllCreators = !S.showAllCreators; renderSidebar(); } }, S.showAllCreators ? "Fewer" : "More creators") : null,
+    sd.tags.length ? h("h3", {}, "Tags") : null,
+    sd.tags.length ? h("div", { class: "tag-cloud" }, ...tagsShown.map((t) =>
+      h("button", { class: S.filter.tag === t.name ? "on" : "", onclick: () => setFilter(S.filter.tag === t.name ? {} : { tag: t.name }) }, t.name))) : null,
+    sd.tags.length > 30 ? h("button", { class: "more-link", onclick: () => { S.showAllTags = !S.showAllTags; renderSidebar(); } }, S.showAllTags ? "Fewer tags" : `All ${sd.tags.length} tags`) : null,
+  );
+}
+async function newCollection() {
+  const name = await askText("New collection", { label: "Create" });
+  if (!name) return;
+  const ids = [...S.selected];
+  try {
+    await api("/api/collections", { method: "POST", body: { name } });
+    if (ids.length) {
+      await api("/api/posts/bulk", { method: "POST", body: { ids, add_collections: [name] } });
+      toast(`Added ${ids.length} to <b>${esc(name)}</b>`);
+      clearSelection();
+    } else toast(`Created <b>${esc(name)}</b>. Drag posts onto it, or select some and choose Add.`);
+    loadSidebar();
+  } catch (e) { toast(esc(e.message), { error: true }); }
+}
+async function dropInto(name, e) {
+  const id = Number(e.dataTransfer.getData("text/stash-id"));
+  const ids = S.selected.size && S.selected.has(id) ? [...S.selected] : [id];
+  await api("/api/posts/bulk", { method: "POST", body: { ids, add_collections: [name] } });
+  toast(`Added ${ids.length > 1 ? ids.length + " posts" : "post"} to <b>${esc(name)}</b>`);
+  clearSelection(); loadSidebar();
+}
+
+// ---------------- scope header ----------------
+function renderScope() {
+  const f = S.filter;
+  let title = "Everything";
+  if (f.collection) title = f.collection;
+  else if (f.tag) title = "#" + f.tag;
+  else if (f.creator) title = "@" + f.creator;
+  else if (f.favorite) title = "Favorites";
+  else if (f.kind === "video") title = "Videos";
+  else if (f.kind === "image") title = "Images";
+  else if (f.uncollected) title = "Not in a collection";
+  else if (f.status === "pending") title = "Waiting for media";
+  else if (f.status === "gone") title = "No longer on Instagram";
+  else if (f.trashed) title = "Trash";
+  if (f.similar) title = "Similar shots";
+  if (f.simimg) title = "Looks like this";
+  const h1 = h("h1", {}, title);
+  if (f.creator || f.tag) h1.style.textTransform = "none";
+  const meta = [h("div", { class: "stat" }, h("span", { class: "lbl" }, "Posts"), h("b", {}, S.total != null ? pad(S.total) : "···"))];
+  if (f.q) meta.push(h("div", { class: "stat" }, h("span", { class: "lbl" }, "Search"), h("b", {}, f.q)));
+  if (f.simimg && S.queryImg) meta.unshift(h("img", { class: "query-img", src: S.queryImg, alt: "Your search image" }));
+  if (f.similar || f.simimg) meta.push(h("div", { class: "stat" }, h("span", { class: "lbl" }, "Ranked by"), h("b", {}, "composition + color")));
+  meta.push(h("span", { class: "spacer" }));
+  if (f.collection) meta.push(
+    h("button", { onclick: boardFromCollection }, "Open as moodboard"),
+    h("button", { onclick: () => exportDialog({ collection: f.collection, count: S.total }) }, "Export"),
+    h("button", { onclick: renameCollection }, "Rename"),
+    h("button", { class: "danger", onclick: deleteCollection }, "Delete"));
+  if (f.trashed) meta.push(h("span", { class: "note" }, "Nothing is deleted until you empty the trash"),
+    h("button", { class: "danger", onclick: emptyTrash }, "Empty trash"));
+  if (f.creator) meta.push(h("button", { onclick: () => openExternal(`https://www.instagram.com/${encodeURIComponent(f.creator)}/`) }, "Open on Instagram"));
+  if (f.similar || f.simimg) meta.push(h("button", { onclick: () => updateFilter({ similar: null, simimg: null }) }, "Back to library"));
+  fill($("#scope"), h1, h("div", { class: "scope-meta" }, ...meta));
+  renderFilters();
+}
+function renderFilters() {
+  const f = S.filter, fc = S.facets || {};
+  const sw = h("div", { class: "swatch-row" },
+    ...SWATCHES.map((c) => h("button", { class: f.color === c ? "on" : "", style: `background:${c}`, title: `Frames featuring ${c}`, "aria-label": `Color ${c}`,
+      onclick: () => updateFilter({ color: f.color === c ? null : c }) })));
+  const custom = h("input", { type: "color", value: f.color || "#c89723", title: "Pick any color", "aria-label": "Pick any color" });
+  custom.onchange = () => updateFilter({ color: custom.value });
+  sw.append(custom);
+  if (f.color && !SWATCHES.includes(f.color)) sw.append(h("button", { class: "on", style: `background:${f.color}`, title: "Clear color", onclick: () => updateFilter({ color: null }) }));
+  const selects = Object.entries(LOOK).map(([k, [label, opts]]) => {
+    const counts = fc[k] || {};
+    const sel = h("select", { class: f[k] ? "on" : "", "aria-label": label },
+      h("option", { value: "" }, label),
+      ...opts.filter(([v]) => k !== "ar" || counts[v]).map(([v, l]) => h("option", { value: v, selected: f[k] === v }, `${l}${counts[v] != null ? "  " + pad(counts[v]) : ""}`)));
+    sel.onchange = () => updateFilter({ [k]: sel.value || null });
+    return h("label", { class: "cell" }, sel);
+  });
+  const active = LOOK_KEYS.some((k) => f[k]);
+  fill($("#filters"),
+    h("div", { class: "cell" }, h("span", { class: "lbl" }, "Color"), sw),
+    ...selects,
+    h("span", { class: "spacer" }),
+    fc.pending ? h("span", { class: "analyzing" }, `Analyzing ${fc.pending} images…`) : null,
+    active ? h("button", { class: "cell", onclick: () => updateFilter(Object.fromEntries(LOOK_KEYS.map((k) => [k, null]))) }, "Clear filters") : null);
+}
+async function boardFromCollection() {
+  const name = S.filter.collection;
+  try {
+    const r = await api("/api/boards", { method: "POST", body: { name, collection: name, limit: 60 } });
+    if (S.total > 60) toast("Started with the 60 newest. Select more posts and use Moodboard to add them.");
+    loadSidebar(); Board.open(r.id);
+  } catch (e) { toast(esc(e.message), { error: true }); }
+}
+async function emptyTrash() {
+  modal({ title: "Empty the trash?", text: "This permanently deletes these posts and their files from your computer. It can't be undone.",
+    actions: [{ label: "Cancel", fn: (c) => c() }, { label: "Delete forever", danger: true, fn: async (c) => {
+      const r = await api("/api/trash/purge", { method: "POST", body: {} });
+      toast(`Deleted ${r.count} posts and freed ${(r.freed / 1048576).toFixed(0)} MB`); c(); loadSidebar(); setFilter({});
+    } }] });
+}
+async function renameCollection() {
+  const old = S.filter.collection;
+  const name = await askText(`Rename “${old}”`, { text: "Use the name of another collection to merge them.", value: old, label: "Rename" });
+  if (!name || name === old) return;
+  await api("/api/collections/rename", { method: "POST", body: { old, new: name } });
+  await loadSidebar(); setFilter({ collection: name });
+}
+async function deleteCollection() {
+  const old = S.filter.collection;
+  if (!(await askConfirm(`Delete “${old}”?`, { text: "The collection goes away. The posts stay in your library.", label: "Delete collection", danger: true }))) return;
+  await api("/api/collections/rename", { method: "POST", body: { old, new: "" } });
+  await loadSidebar(); setFilter({});
+}
+
+// ---------------- grid ----------------
+let cols = [], colHeights = [];
+const fr = { pending: [], tail: null, width: 0 };
+function colCount() {
+  const w = $("#grid").clientWidth || window.innerWidth;
+  const d = Number($("#density").value);
+  const ideal = Math.max(2, Math.round(w / (1600 / d)));
+  return window.innerWidth < 600 ? Math.min(ideal, 2) : ideal;
+}
+function frameHeight() {
+  const d = Number($("#density").value);              // 2 (big) … 9 (small)
+  const hgt = Math.round(470 - (d - 2) * 46);
+  return window.innerWidth < 600 ? Math.min(hgt, 150) : hgt;
+}
+function aspectOf(p) {
+  const m = p.media[0] || {};
+  const a = m.ar || (m.width && m.height ? m.width / m.height : 0.8);
+  return Math.max(0.45, Math.min(3.2, a));
+}
+function framesFlush(final) {
+  const grid = $("#grid"), W = grid.clientWidth - 12, H = frameHeight(), g = 6;
+  fr.width = grid.clientWidth;
+  if (fr.tail) { fr.tail.remove(); fr.tail = null; }
+  let row = [], sum = 0;
+  const queue = fr.pending; fr.pending = [];
+  for (const it of queue) {
+    row.push(it); sum += aspectOf(it[0]);
+    if (sum * H + g * (row.length - 1) >= W) {
+      grid.append(frameRow(row, (W - g * (row.length - 1)) / sum));
+      row = []; sum = 0;
+    }
+  }
+  fr.pending = row;
+  if (row.length) { fr.tail = frameRow(row, H); grid.append(fr.tail); }
+}
+function frameRow(items, rh) {
+  return h("div", { class: "frow", style: `height:${rh}px` }, ...items.map(([p, i]) => {
+    const el = tile(p, i);
+    el.style.width = aspectOf(p) * rh + "px"; el.style.height = rh + "px";
+    return el;
+  }));
+}
+function layout(reset) {
+  const grid = $("#grid"), n = colCount();
+  grid.className = "grid " + S.view;
+  $("#viewIndex").classList.toggle("on", S.view === "index");
+  $("#viewFrames").classList.toggle("on", S.view === "frames");
+  if (S.view === "frames") {
+    if (reset || Math.abs(grid.clientWidth - fr.width) > 2) {
+      fill(grid); fr.pending = S.items.map((p, i) => [p, i]); fr.tail = null; framesFlush();
+    }
+    return;
+  }
+  if (S.view === "index") {
+    grid.style.setProperty("--cols", n);
+    if (reset) { fill(grid); cols = []; S.items.forEach((p, i) => grid.append(tile(p, i))); }
+    return;
+  }
+}
+function place(p, i) {
+  if (S.view === "frames") return fr.pending.push([p, i]);
+  $("#grid").append(tile(p, i));
+}
+function kindLabel(p) {
+  const m = p.media[0] || {};
+  if (m.kind === "video") return "Video " + fmtTime(m.duration).replace(/\.\d\d$/, "");
+  if (p.media_count > 1) return p.media_count + " img";
+  return m.width ? `${m.width}×${m.height}` : "";
+}
+function tile(p, i, ratio) {
+  const m = p.media[0] || {};
+  const isVideo = m.kind === "video";
+  const num = "[" + pad(i + 1, Math.max(3, String(S.total || 0).length)) + "]";
+  const box = h("span", { class: "box" }, m.thumb_src ? h("img", { src: m.thumb_src, loading: "lazy", decoding: "async", alt: "" }) : null);
+  const el = h("button", { class: "tile" + (S.selected.has(p.id) ? " sel" : ""), "data-id": p.id, draggable: "true", "aria-label": `Post ${i + 1} by ${p.username || "unknown"}` }, box);
+  if (S.view === "index") {
+    el.append(h("span", { class: "cap" }, h("span", { class: "n" }, num), h("span", { class: "k" }, (p.favorite ? "★ " : "") + kindLabel(p))),
+      h("span", { class: "who" }, p.username ? "@" + p.username : p.shortcode));
+  } else {
+    el.append(h("span", { class: "meta" }, h("span", {}, num + " " + (p.username ? "@" + p.username : "")),
+      h("span", {}, [(m.ar_label || ""), m.kind === "video" ? fmtTime(m.duration).replace(/\.\d\d$/, "") : p.media_count > 1 ? p.media_count + " img" : ""].filter(Boolean).join(" / "))));
+  }
+  el.addEventListener("click", (e) => {
+    if (e.shiftKey || e.metaKey || e.ctrlKey || S.selected.size) return toggleSelect(p.id, el, e.shiftKey ? i : null);
+    openViewer(i);
+  });
+  el.addEventListener("dragstart", (e) => e.dataTransfer.setData("text/stash-id", p.id));
+  if (isVideo) {
+    let v, timer;
+    el.addEventListener("mouseenter", () => {
+      timer = setTimeout(() => {
+        v = h("video", { src: m.src, muted: true, loop: true, playsinline: true, preload: "auto" });
+        v.muted = true; box.append(v); v.play().catch(() => {});
+      }, 180);
+    });
+    el.addEventListener("mouseleave", () => { clearTimeout(timer); if (v) { v.pause(); v.remove(); v = null; } });
+  }
+  return el;
+}
+async function loadMore() {
+  if (S.loading || !S.more) return;
+  S.loading = true;
+  const gen = S.gen;
+  const p = new URLSearchParams({ ...S.filter, sort: S.sort, offset: S.offset, limit: 80 });
+  if (S.sort === "random") p.set("seed", S.seed);
+  try {
+    const data = await api("/api/posts?" + p);
+    if (gen !== S.gen) return;
+    if (data.total != null) { S.total = data.total; renderScope(); }
+    const start = S.items.length;
+    S.items.push(...data.items);
+    S.offset += data.items.length;
+    S.more = data.more;
+    data.items.forEach((post, j) => place(post, start + j));
+    if (S.view === "frames") framesFlush();
+    renderEmpty();
+  } catch (e) { toast(esc(e.message), { error: true }); }
+  finally { S.loading = false; }
+  // keep filling if the sentinel is still on screen
+  requestAnimationFrame(() => {
+    if (S.more && $("#sentinel").getBoundingClientRect().top < window.innerHeight + 800) loadMore();
+  });
+}
+function reload() {
+  S.gen++; S.items = []; S.offset = 0; S.more = true; S.total = null; S.loading = false;
+  layout(true); renderScope(); loadMore();
+}
+function renderEmpty() {
+  const el = $("#empty");
+  if (S.items.length || S.more) { el.hidden = true; return; }
+  el.hidden = false;
+  const lib = S.side?.counts || {};
+  if (!lib.ready && !lib.pending && !Object.keys(S.filter).length) {
+    fill(el, 
+      h("h2", {}, "Bring in your saves"),
+      h("p", {}, "Import the data export from Instagram to pull in your whole backlog and its collections, then connect sync so new saves arrive on their own."),
+      h("div", { class: "row" },
+        h("button", { class: "primary", onclick: () => openDrawer("import") }, "Import Instagram export"),
+        h("button", { onclick: () => openDrawer("sync") }, "Set up sync")));
+  } else if (S.filter.status === "pending" || (lib.pending && !lib.ready)) {
+    fill(el, h("h2", {}, `${(lib.pending || 0).toLocaleString()} posts are waiting for their media`),
+      h("p", {}, "Your export lists what you saved, but not the photos and videos themselves. Run a sync to download them. Collections you've linked download fastest."),
+      h("div", { class: "row" }, h("button", { class: "primary", onclick: () => openDrawer("sync") }, "Open sync")));
+  } else if (S.filter.trashed) {
+    fill(el, h("h2", {}, "The trash is empty"), h("p", {}, "Posts you move to the trash wait here until you empty it, so nothing is lost by accident."));
+  } else {
+    fill(el, h("h2", {}, "Nothing here"),
+      h("p", {}, S.filter.q ? "No saves match that search. Try fewer words, or search everything." : "No saves match this view yet."),
+      S.filter.q || Object.keys(S.filter).length ? h("div", { class: "row" }, h("button", { onclick: () => { $("#q").value = ""; setFilter({}, false); } }, "Show everything")) : null);
+  }
+}
+
+// ---------------- selection ----------------
+let lastSelIndex = null;
+function toggleSelect(id, el, rangeIndex) {
+  if (rangeIndex != null && lastSelIndex != null) {
+    const [a, b] = [lastSelIndex, rangeIndex].sort((x, y) => x - y);
+    for (let i = a; i <= b; i++) S.selected.add(S.items[i].id);
+  } else if (S.selected.has(id)) S.selected.delete(id);
+  else S.selected.add(id);
+  if (rangeIndex != null) lastSelIndex = rangeIndex;
+  else lastSelIndex = S.items.findIndex((p) => p.id === id);
+  document.querySelectorAll(".tile").forEach((t) => t.classList.toggle("sel", S.selected.has(Number(t.dataset.id))));
+  renderSelbar();
+}
+function clearSelection() {
+  S.selected.clear(); lastSelIndex = null;
+  document.querySelectorAll(".tile.sel").forEach((t) => t.classList.remove("sel"));
+  renderSelbar();
+}
+function renderSelbar() {
+  const n = S.selected.size, bar = $("#selbar");
+  bar.hidden = !n;
+  if (!n) return;
+  const ids = () => [...S.selected];
+  const count = h("span", { id: "selCount" }, `${n} selected`);
+  const done = () => { clearSelection(); loadSidebar(); reload(); };
+  if (S.filter.trashed) {
+    fill(bar, count,
+      h("button", { onclick: async () => { await api("/api/posts/trash", { method: "POST", body: { ids: ids(), restore: true } }); toast(`Restored ${n}`); done(); } }, "Restore"),
+      h("button", { class: "danger", onclick: () => modal({ title: `Delete ${n} permanently?`, text: "Their files are removed from your computer. This can't be undone.",
+        actions: [{ label: "Cancel", fn: (c) => c() }, { label: "Delete forever", danger: true, fn: async (c) => { await api("/api/trash/purge", { method: "POST", body: { ids: ids() } }); c(); done(); } }] }) }, "Delete forever"),
+      h("span", { class: "grow" }),
+      h("button", { onclick: clearSelection }, "Clear"));
+    return;
+  }
+  const input = h("input", { list: "collectionList", placeholder: "Collection name or #tag" });
+  const add = async () => {
+    const v = input.value.trim();
+    if (!v) return input.focus();
+    await api("/api/posts/bulk", { method: "POST", body: v.startsWith("#") ? { ids: ids(), add_tags: [v.slice(1)] } : { ids: ids(), add_collections: [v] } });
+    toast(`Added ${n} to <b>${esc(v)}</b>`); done();
+  };
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") add(); e.stopPropagation(); });
+  const boards = h("select", { "aria-label": "Add to moodboard" },
+    h("option", { value: "" }, "Moodboard…"), h("option", { value: "__new" }, "New moodboard from selection"),
+    ...(S.side?.boards || []).map((b) => h("option", { value: b.id }, b.name)));
+  boards.onchange = async () => {
+    const v = boards.value; boards.value = "";
+    if (v === "__new") {
+      const name = await askText("New moodboard", { value: S.filter.collection || "Untitled moodboard", label: "Create" });
+      if (!name) return;
+      const r = await api("/api/boards", { method: "POST", body: { name, post_ids: ids() } });
+      clearSelection(); loadSidebar(); Board.open(r.id);
+    } else if (v) {
+      const r = await api(`/api/boards/${v}/add`, { method: "POST", body: { post_ids: ids() } });
+      const name = S.side.boards.find((b) => String(b.id) === v)?.name;
+      toast(`Added ${r.added} to <b>${esc(name)}</b>`, { action: { label: "Open", fn: () => Board.open(Number(v)) } });
+      clearSelection(); loadSidebar();
+    }
+  };
+  fill(bar, count, input, h("button", { onclick: add }, "Add"),
+    S.filter.collection ? h("button", { class: "ghost", onclick: async () => {
+      await api("/api/posts/bulk", { method: "POST", body: { ids: ids(), remove_collections: [S.filter.collection] } });
+      toast(`Removed ${n} from <b>${esc(S.filter.collection)}</b>`); done(); } }, "Remove from this one") : null,
+    boards,
+    h("button", { onclick: () => exportDialog({ ids: ids(), name: "Stash selection", count: n }) }, "Export"),
+    h("button", { class: "ghost danger", onclick: async () => {
+      const moved = ids();
+      await api("/api/posts/trash", { method: "POST", body: { ids: moved } });
+      toast(`Moved ${moved.length} to trash`, { action: { label: "Undo", fn: async () => { await api("/api/posts/trash", { method: "POST", body: { ids: moved, restore: true } }); loadSidebar(); reload(); } } });
+      done(); } }, "Trash"),
+    h("span", { class: "grow" }),
+    h("button", { onclick: clearSelection }, "Clear"));
+}
+
+// ---------------- viewer ----------------
+const V = { video: null };
+async function openViewer(i) {
+  if (i < 0 || i >= S.items.length) return;
+  S.viewerIndex = i; S.slide = 0; S.inPt = S.outPt = null;
+  $("#viewer").hidden = false; document.body.style.overflow = "hidden";
+  const id = S.items[i].id;
+  S.post = await api(`/api/posts/${id}`);
+  if (S.items[S.viewerIndex]?.id !== id) return;
+  renderStage(); renderInfo();
+  if (i >= S.items.length - 6) loadMore();
+}
+function closeViewer() {
+  $("#viewer").hidden = true; document.body.style.overflow = "";
+  if (V.video) V.video.pause();
+  fill($("#frame"), ); S.post = null;
+}
+function currentMedia() { return S.post?.media[S.slide]; }
+function renderStage() {
+  const m = currentMedia();
+  const frame = $("#frame");
+  V.video = null;
+  if (!m) { fill(frame, h("p", { class: "hint" }, "Media hasn't downloaded yet. It'll appear after the next sync.")); $("#deck").hidden = true; fill($("#slides"), ); return; }
+  if (m.kind === "video") {
+    const v = h("video", { src: m.src, playsinline: true, loop: true, preload: "auto" });
+    v.addEventListener("click", togglePlay);
+    v.addEventListener("timeupdate", updateDeck);
+    v.addEventListener("loadedmetadata", updateDeck);
+    v.addEventListener("play", updateDeck); v.addEventListener("pause", updateDeck);
+    fill(frame, v); V.video = v;
+    v.play().catch(() => {});
+    $("#deck").hidden = false;
+  } else {
+    fill(frame, h("img", { src: m.src, alt: S.post.caption?.slice(0, 120) || "" }));
+    $("#deck").hidden = true;
+  }
+  const slides = S.post.media.length > 1 ? S.post.media.map((mm, j) =>
+    h("button", { class: j === S.slide ? "on" : "", onclick: () => { S.slide = j; S.inPt = S.outPt = null; renderStage(); renderInfo(); }, "aria-label": `Item ${j + 1}` },
+      h("img", { src: mm.thumb_src, alt: "" }))) : [];
+  fill($("#slides"), ...slides);
+  updateDeck();
+}
+function updateDeck() {
+  const v = V.video; if (!v) return;
+  const d = v.duration || currentMedia()?.duration || 1;
+  const pct = (t) => `${(t / d) * 100}%`;
+  $("#head").style.left = pct(v.currentTime);
+  $("#played").style.width = pct(v.currentTime);
+  $("#tc").textContent = fmtTime(v.currentTime);
+  $("#play").textContent = v.paused ? "Play" : "Pause";
+  const mi = $("#markIn"), mo = $("#markOut"), r = $("#range");
+  mi.classList.toggle("on", S.inPt != null); mo.classList.toggle("on", S.outPt != null);
+  if (S.inPt != null) mi.style.left = pct(S.inPt);
+  if (S.outPt != null) mo.style.left = `calc(${pct(S.outPt)} - 2px)`;
+  const a = S.inPt ?? 0, b = S.outPt ?? d;
+  r.style.display = S.inPt != null || S.outPt != null ? "block" : "none";
+  r.style.left = pct(a); r.style.width = pct(Math.max(0, b - a));
+  $("#inTc").textContent = S.inPt != null ? fmtTime(S.inPt) : "–";
+  $("#outTc").textContent = S.outPt != null ? fmtTime(S.outPt) : "–";
+  const range = $("#clipRange");
+  if (range) range.textContent = `${fmtTime(a)} → ${fmtTime(b)} / ${(b - a).toFixed(1)}S`;
+}
+function togglePlay() { const v = V.video; if (!v) return; v.paused ? v.play() : v.pause(); }
+function step(dir) { const v = V.video; if (!v) return; v.pause(); v.currentTime = Math.max(0, Math.min(v.duration, v.currentTime + dir / 30)); }
+function setIn() { if (!V.video) return; S.inPt = V.video.currentTime; if (S.outPt != null && S.outPt <= S.inPt) S.outPt = null; updateDeck(); }
+function setOut() { if (!V.video) return; S.outPt = V.video.currentTime; if (S.inPt != null && S.inPt >= S.outPt) S.inPt = null; updateDeck(); }
+(() => {
+  const scrub = $("#scrub");
+  const seek = (e) => {
+    const v = V.video; if (!v) return;
+    const r = scrub.getBoundingClientRect();
+    v.currentTime = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * (v.duration || 0);
+  };
+  scrub.addEventListener("pointerdown", (e) => { scrub.setPointerCapture(e.pointerId); V.video?.pause(); seek(e); scrub.onpointermove = seek; });
+  scrub.addEventListener("pointerup", () => { scrub.onpointermove = null; });
+})();
+$("#play").onclick = togglePlay;
+$("#stepBack").onclick = () => step(-1);
+$("#stepFwd").onclick = () => step(1);
+$("#setIn").onclick = setIn;
+$("#setOut").onclick = setOut;
+$("#grab").onclick = grabFrame;
+
+async function downloadUrl(url) {
+  if (DESKTOP) {
+    try { savedToast(await api("/api/desktop/save", { method: "POST", body: { url } })); }
+    catch (e) { toast(esc(e.message), { error: true }); }
+    return;
+  }
+  const a = h("a", { href: url, download: "" }); document.body.append(a); a.click(); a.remove();
+}
+async function runTool(label, action, body, btn) {
+  const m = currentMedia();
+  if (btn) { btn.disabled = true; btn.dataset.label = btn.textContent; btn.textContent = label; }
+  try {
+    const r = await api(`/api/media/${m.id}/${action}`, { method: "POST", body });
+    downloadUrl(r.url);
+    if (!DESKTOP) toast(`Saved <b>${esc(r.name)}</b> (${(r.size / 1048576).toFixed(1)} MB)`);
+  } catch (e) { toast(esc(e.message), { error: true }); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = btn.dataset.label; } }
+}
+function grabFrame() { if (V.video) runTool("Grabbing…", "still", { t: V.video.currentTime }, $("#grab")); }
+
+function lumHex(hx) {
+  const n = parseInt(hx.slice(1), 16);
+  return (0.299 * (n >> 16) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255;
+}
+function lookLink(k, v, label) {
+  return v ? h("button", { class: "link", title: "Show all like this", onclick: () => { closeViewer(); updateFilter({ [k]: v, similar: null, simimg: null }); } }, label || v) : "–";
+}
+function renderInfo() {
+  const p = S.post, m = currentMedia();
+  const info = $("#info");
+  const save = async (body) => {
+    S.post = await api(`/api/posts/${p.id}`, { method: "PATCH", body });
+    const item = S.items[S.viewerIndex];
+    if (item && item.id === p.id) Object.assign(item, { favorite: S.post.favorite });
+    renderInfo(); loadSidebar();
+  };
+  const chipList = (names, kind) => names.length ? h("div", { class: "chips" }, ...names.map((n) =>
+    h("span", { class: "chip" + (kind === "tag" ? " tag" : "") }, kind === "tag" ? "#" + n : n,
+      h("button", { "aria-label": `Remove ${n}`, onclick: () => save(kind === "tag" ? { remove_tags: [n] } : { remove_collections: [n] }) }, "×")))) : null;
+  const adder = (placeholder, kind) => {
+    const inp = h("input", { class: "add-input", placeholder, list: kind === "col" ? "collectionList" : null });
+    inp.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && inp.value.trim()) {
+        const vals = inp.value.split(",").map((x) => x.trim().replace(/^#/, "")).filter(Boolean);
+        save(kind === "tag" ? { add_tags: vals } : { add_collections: vals });
+      }
+      e.stopPropagation();
+    });
+    return inp;
+  };
+  const notes = h("textarea", { rows: 4, placeholder: "Why you saved it, where you'd use it" }, p.notes || "");
+  notes.addEventListener("keydown", (e) => e.stopPropagation());
+  notes.addEventListener("change", () => save({ notes: notes.value }));
+
+  const cap = h("p", { class: "caption" }, p.caption || "No caption.");
+  const capMore = (p.caption || "").length > 360 ? h("button", { class: "more", onclick: () => { cap.classList.toggle("open"); capMore.textContent = cap.classList.contains("open") ? "Show less" : "Show more"; } }, "Show more") : null;
+
+  const isVideo = m?.kind === "video";
+  const spec = (k, v) => [h("div", { class: "k" }, k), h("div", { class: "v" }, v)];
+  const sections = [];
+  if (m) {
+    sections.push(h("section", {},
+      h("div", { class: "cells" },
+        h("button", { class: "primary", onclick: () => downloadUrl(`/api/media/${m.id}/download`) }, isVideo ? "Download video" : "Download image"),
+        p.media.length > 1 ? h("button", { onclick: () => downloadUrl(`/api/posts/${p.id}/zip`) }, `All ${p.media.length} as zip`) : null)));
+  }
+  if (isVideo) {
+    const fmt = h("select", {}, ...[480, 640, 960, 1280].map((w) => h("option", { value: w, selected: w === 640 }, w + " wide")));
+    const fps = h("select", {}, ...[12, 15, 24].map((f) => h("option", { value: f, selected: f === 15 }, f + " fps")));
+    const range = () => ({ start: S.inPt ?? 0, end: S.outPt ?? (V.video?.duration || m.duration) });
+    sections.push(h("section", {},
+      h("h4", {}, "Clip", h("span", { class: "tc", id: "clipRange" })),
+      h("div", { class: "cells" },
+        h("button", { onclick: (e) => runTool("Exporting…", "clip", { ...range(), format: "mp4" }, e.currentTarget) }, "Export MP4"),
+        h("button", { onclick: (e) => runTool("Making GIF…", "clip", { ...range(), format: "gif", width: Number(fmt.value), fps: Number(fps.value) }, e.currentTarget) }, "Export GIF")),
+      h("div", { class: "opts" }, h("span", { class: "lbl" }, "GIF"), fmt, fps),
+      h("p", { class: "hint pad", style: "margin:0;border-top:1px solid var(--rule-soft)" }, "Mark a section with I and O, or export the whole video.")));
+    sections.push(h("section", {},
+      h("h4", {}, "Stills"),
+      h("div", { class: "cells" },
+        h("button", { onclick: grabFrame }, "Grab frame"),
+        h("button", { onclick: (e) => runTool("Finding shots…", "shots", {}, e.currentTarget) }, "Every shot")),
+      h("p", { class: "hint pad", style: "margin:0;border-top:1px solid var(--rule-soft)" }, "Every shot saves one full-resolution PNG per cut. Step frames with , and .")));
+  }
+  const total = S.total || S.items.length;
+  fill(info,
+    h("div", { class: "head-row" },
+      h("span", { class: "pos" }, `${pad(S.viewerIndex + 1)} / ${pad(total)}`),
+      h("button", { class: "fav-btn" + (p.favorite ? " on" : ""), title: "Favorite (F)", "aria-pressed": p.favorite ? "true" : "false", onclick: () => save({ favorite: !p.favorite }) }, p.favorite ? "★ Favorite" : "☆ Favorite")),
+    h("div", { class: "spec" },
+      ...spec("Creator", p.username ? h("a", { href: "#", onclick: (e) => { e.preventDefault(); closeViewer(); setFilter({ creator: p.username }, false); } }, "@" + p.username) : "–"),
+      ...spec("Saved", fmtDay(p.saved_at)),
+      ...spec("Posted", fmtDay(p.posted_at)),
+      ...spec("Format", m ? `${m.kind === "video" ? "Video" : "Image"} ${m.width || "?"}×${m.height || "?"}${isVideo ? " " + fmtTime(m.duration) : ""}`.toUpperCase() : "Not downloaded"),
+      ...(p.media.length > 1 ? spec("Item", `${pad(S.slide + 1, 2)} / ${pad(p.media.length, 2)}`) : []),
+      ...spec("Source", h("a", { href: p.url, onclick: (e) => { e.preventDefault(); openExternal(p.url); } }, "Instagram ↗")),
+      ...(m && m.tone ? [
+        ...spec("Aspect", lookLink("ar", m.ar_label, m.ar_label)),
+        ...spec("Look", h("span", {}, lookLink("tone", m.tone, LOOK.tone[1].find((o) => o[0] === m.tone)?.[1]), " / ",
+          lookLink("sat", m.sat, LOOK.sat[1].find((o) => o[0] === m.sat)?.[1]), " / ",
+          lookLink("temp", m.temp, LOOK.temp[1].find((o) => o[0] === m.temp)?.[1]), " / ",
+          lookLink("contrast", m.contrast, (LOOK.contrast[1].find((o) => o[0] === m.contrast)?.[1] || "") + " contrast"))),
+      ] : [])),
+    m && m.palette ? h("div", { class: "palette" }, ...m.palette.map(([hex, share]) =>
+      h("button", { style: `background:${hex};flex:${share} 1 0;color:${lumHex(hex) > 0.55 ? "#000" : "#fff"}`, title: `Find frames featuring ${hex}`,
+        onclick: () => { closeViewer(); updateFilter({ color: hex, similar: null, simimg: null }); } }, h("span", {}, hex)))) : null,
+    h("div", { class: "cells" },
+      h("button", { onclick: () => { const id = p.id; closeViewer(); S.queryImg = null; updateFilter({ similar: String(id), simimg: null }); } }, "Similar shots"),
+      m && m.palette ? h("button", { onclick: () => { closeViewer(); updateFilter({ color: m.palette.find(([hx]) => { const l = lumHex(hx); return l > 0.12 && l < 0.92; })?.[0] || m.palette[0][0] }); } }, "Same color") : null),
+    cap, capMore,
+    ...sections,
+    h("section", {}, h("h4", {}, "Collections"), chipList(p.collections, "col"), adder("Add to collection", "col")),
+    h("section", {}, h("h4", {}, "Tags"), chipList(p.tags || [], "tag"), adder("Add tags, comma separated", "tag")),
+    h("section", {}, h("h4", {}, "Notes"), notes),
+    h("section", { class: "trash-row" }, p.deleted_at
+      ? h("button", { onclick: async () => { await api("/api/posts/trash", { method: "POST", body: { ids: [p.id], restore: true } }); toast("Restored"); closeViewer(); loadSidebar(); reload(); } }, "Restore from trash")
+      : h("button", { class: "danger", onclick: async () => {
+          await api("/api/posts/trash", { method: "POST", body: { ids: [p.id] } });
+          toast("Moved to trash", { action: { label: "Undo", fn: async () => { await api("/api/posts/trash", { method: "POST", body: { ids: [p.id], restore: true } }); loadSidebar(); reload(); } } });
+          closeViewer(); loadSidebar(); reload(); } }, "Move to trash")),
+    h("div", { class: "grow" }),
+    h("div", { class: "navbar" },
+      h("button", { onclick: () => openViewer(S.viewerIndex - 1), disabled: S.viewerIndex <= 0 }, "Previous"),
+      h("button", { onclick: closeViewer }, "Close"),
+      h("button", { onclick: () => openViewer(S.viewerIndex + 1), disabled: S.viewerIndex >= total - 1 }, "Next")),
+  );
+  updateDeck();
+}
+
+// ---------------- settings / sync drawer ----------------
+async function openDrawer(focus) {
+  $("#drawer").hidden = false; $("#scrim").hidden = false;
+  S.settings = await api("/api/settings");
+  renderDrawer(focus);
+  pollJobs(true);
+}
+function closeDrawer() { $("#drawer").hidden = true; $("#scrim").hidden = true; }
+$("#closeDrawer").onclick = closeDrawer;
+$("#scrim").onclick = closeDrawer;
+$("#syncPill").onclick = () => openDrawer();
+
+function renderDrawer(focus) {
+  const s = S.settings, c = S.side?.counts || {};
+  const body = $("#drawerBody");
+  const saveSettings = async (patch, quiet) => {
+    S.settings = { ...S.settings, ...(await api("/api/settings", { method: "PUT", body: patch })) };
+    if (!quiet) toast("Settings saved");
+  };
+
+  // --- status + run
+  const runBtn = h("button", { class: "primary", onclick: () => startJobs(["sync", "backfill"]) }, "Sync now");
+  const statusSec = h("section", {},
+    h("h3", {}, "Status"),
+    h("div", { class: "stat-line" }, `${(c.ready || 0).toLocaleString()} posts ready`, c.pending ? `, ${c.pending.toLocaleString()} waiting for media` : "", c.gone ? `, ${c.gone} no longer available` : ""),
+    h("div", { class: "row" }, runBtn,
+      h("button", { onclick: () => startJobs(["sync"]) }, "Check for new saves only"),
+      c.pending ? h("button", { onclick: () => startJobs(["backfill"]) }, "Fetch waiting media") : null,
+      h("button", { class: "danger", onclick: () => api("/api/jobs", { method: "POST", body: { action: "cancel" } }).then(() => toast("Stopping after the current post")) }, "Stop")),
+    h("div", { class: "jobs", id: "jobList", style: "margin-top:14px" }));
+  if (!s._gallery_dl) statusSec.append(h("p", { style: "color:var(--danger)" }, "The sync engine is missing from this copy of Stash. Download the latest version and replace the app."));
+
+  // --- import
+  const fileInput = h("input", { type: "file", accept: ".zip,.json", multiple: true, hidden: true });
+  const drop = h("div", { class: "drop", tabindex: "0", onclick: () => fileInput.click() }, "Drop the export .zip here, or click to choose it");
+  const doImport = async (files) => {
+    const fd = new FormData();
+    for (const f of files) fd.append("file", f);
+    drop.textContent = "Reading export…";
+    try {
+      const r = await api("/api/import", { method: "POST", body: fd });
+      drop.textContent = `Found ${r.posts_found.toLocaleString()} saves (${r.new_posts.toLocaleString()} new) across ${r.collections.length} collections.`;
+      toast(`Imported ${r.new_posts.toLocaleString()} saves. Run Sync now to download their media.`);
+      loadSidebar(); reload();
+    } catch (e) { drop.textContent = e.message; }
+  };
+  fileInput.onchange = () => doImport(fileInput.files);
+  drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); doImport(e.dataTransfer.files); });
+  const importSec = h("section", { id: "sec-import" },
+    h("h3", {}, h("span", { class: "step" }, "01"), "Import your backlog"),
+    h("p", {}, "Instagram's data export lists every save and which collection it's in. Request it once, drop it here, and sync fills in the photos and videos."),
+    h("details", { open: focus === "import" ? true : null },
+      h("summary", {}, "How to get the export"),
+      h("ol", { class: "steps" },
+        h("li", {}, "Instagram app or web: Settings, then Accounts Center"),
+        h("li", {}, "Your information and permissions, then Download your information"),
+        h("li", {}, "Choose Some of your information and tick Saved"),
+        h("li", {}, "Set the format to JSON (not HTML) and media quality to anything"),
+        h("li", {}, "Instagram emails you a link, usually within a day"))),
+    drop, fileInput);
+
+  // --- account + collections
+  const user = h("input", { value: s.instagram_username || "", placeholder: "yourhandle" });
+  const browser = h("select", {}, ...["chrome", "safari", "firefox", "brave", "edge", "vivaldi", "zen", "file"].map((b) =>
+    h("option", { value: b, selected: s.cookies_source === b }, b === "file" ? "A cookies.txt file" : b[0].toUpperCase() + b.slice(1))));
+  const cfile = h("input", { value: s.cookies_file || "", placeholder: "/path/to/cookies.txt" });
+  const cfileField = h("label", { class: "field", hidden: s.cookies_source !== "file" }, "cookies.txt path", cfile);
+  browser.onchange = () => { cfileField.hidden = browser.value !== "file"; };
+  const allSaved = h("input", { type: "checkbox", checked: s.sync_all_saved });
+  const colList = h("div", { class: "col-list" });
+  const colRows = [];
+  const addColRow = (c = { name: "", url: "" }) => {
+    const name = h("input", { value: c.name, placeholder: "Name" });
+    const url = h("input", { value: c.url, placeholder: "https://www.instagram.com/you/saved/name/1784…/" });
+    url.addEventListener("change", () => {
+      const m = url.value.match(/\/saved\/([^/]+)\/\d+/);
+      if (m && !name.value) name.value = decodeURIComponent(m[1]).replace(/-/g, " ").replace(/\b\w/g, (x) => x.toUpperCase());
+    });
+    const row = h("div", { class: "col-row" }, name, url, h("button", { class: "ghost", "aria-label": "Remove collection", onclick: () => { row.remove(); colRows.splice(colRows.indexOf(r), 1); } }, "×"));
+    const r = { name, url };
+    colRows.push(r); colList.append(row);
+  };
+  (s.collections || []).forEach(addColRow);
+  if (!colRows.length) addColRow();
+  const auto = h("select", {}, ...[[0, "Off"], [3, "Every 3 hours"], [6, "Every 6 hours"], [12, "Twice a day"], [24, "Once a day"]].map(([v, l]) =>
+    h("option", { value: v, selected: Number(s.auto_sync_hours) === v }, l)));
+  const perRun = h("input", { value: s.backfill_per_run, inputmode: "numeric" });
+  const d0 = h("input", { value: s.request_delay?.[0] ?? 6, inputmode: "numeric" });
+  const d1 = h("input", { value: s.request_delay?.[1] ?? 12, inputmode: "numeric" });
+  const syncSec = h("section", { id: "sec-sync" },
+    h("h3", {}, h("span", { class: "step" }, "02"), "Connect sync"),
+    h("p", {}, "Sync reads your saves using the Instagram login already in your browser. Nothing is posted and no password is stored here. Requests are slow on purpose, so a big first sync takes a while."),
+    h("p", { class: "hint" }, "The first time, your Mac asks if Stash may use “Chrome Safe Storage” (or your browser's equivalent). Choose Always Allow, that's how Stash reads your Instagram login. For Safari, turn on Full Disk Access for Stash in System Settings › Privacy & Security."),
+    h("div", { class: "two" },
+      h("label", { class: "field" }, "Instagram username", user),
+      h("label", { class: "field" }, "Browser you're logged in with", browser)),
+    cfileField,
+    h("label", { class: "check" }, allSaved, "Also sync All posts (catches saves that aren't in a collection)"),
+    h("h3", { class: "sub" }, "Collections to sync"),
+    h("p", {}, "Open each collection on instagram.com in your browser and paste its address. Linked collections download in one pass, which is much faster than fetching posts one by one."),
+    colList,
+    h("button", { onclick: () => addColRow() }, "Add another collection"),
+    h("div", { class: "two", style: "margin-top:14px" },
+      h("label", { class: "field" }, "Sync automatically", auto),
+      h("label", { class: "field" }, "Waiting posts to fetch per run", perRun)),
+    h("details", {},
+      h("summary", {}, "Pacing"),
+      h("p", {}, "Seconds to wait between requests to Instagram. Going faster than the default raises the chance Instagram asks you to verify your account."),
+      h("div", { class: "two" }, h("label", { class: "field" }, "At least", d0), h("label", { class: "field" }, "At most", d1))),
+    h("div", { class: "row", style: "margin-top:12px" },
+      h("button", { class: "primary", onclick: () => saveSettings({
+        instagram_username: user.value.trim().replace(/^@/, ""), cookies_source: browser.value, cookies_file: cfile.value.trim(),
+        sync_all_saved: allSaved.checked, auto_sync_hours: Number(auto.value), backfill_per_run: Number(perRun.value) || 150,
+        request_delay: [Number(d0.value) || 6, Math.max(Number(d1.value) || 12, Number(d0.value) || 6)],
+        collections: colRows.map((r) => ({ name: r.name.value.trim(), url: r.url.value.trim() })).filter((r) => r.url),
+      }) }, "Save sync settings")));
+
+  const themeNow = getTheme();
+  const appearSec = h("section", {}, h("h3", {}, "Appearance"),
+    h("div", { class: "seg" }, ...[["auto", "Match my Mac"], ["light", "Light"], ["dark", "Dark"]].map(([k, l]) =>
+      h("button", { class: themeNow === k ? "on" : "", onclick: (e) => { applyTheme(k); e.currentTarget.parentNode.querySelectorAll("button").forEach((b) => b.classList.remove("on")); e.currentTarget.classList.add("on"); } }, l))));
+
+  const libInfo = h("div", { class: "stat-line" }, "Checking library…");
+  const libSec = h("section", {}, h("h3", {}, "Library"),
+    h("p", {}, "Stash backs up your library's database once a day and keeps the last 7. Your photos and videos stay in the folder below; they aren't copied into backups."),
+    libInfo,
+    h("div", { class: "row" },
+      h("button", { onclick: async (e) => { const b = e.currentTarget; b.disabled = true; try { await api("/api/library/backup", { method: "POST", body: {} }); toast("Backup saved"); loadLib(); } catch (er) { toast(esc(er.message), { error: true }); } b.disabled = false; } }, "Back up now"),
+      h("button", { onclick: async (e) => {
+        const b = e.currentTarget; b.disabled = true; b.innerHTML = '<span class="spinner"></span>Checking…';
+        try {
+          const r = await api("/api/library/check", { method: "POST", body: {} });
+          toast(r.requeued ? `Checked ${r.checked.toLocaleString()} files. ${r.requeued} posts lost files and were queued to download again.` : `Checked ${r.checked.toLocaleString()} files. All good.`);
+          loadSidebar(); reload();
+        } catch (er) { toast(esc(er.message), { error: true }); }
+        b.disabled = false; b.textContent = "Check files";
+      } }, "Check files")));
+  const loadLib = () => api("/api/library").then((l) => {
+    const last = l.backups[0];
+    libInfo.textContent = `${(l.size / 1073741824).toFixed(2)} GB of media. ` + (last ? `Last backup ${new Date(last.mtime * 1000).toLocaleString()}.` : "No backup yet.");
+    if (!l.ffmpeg) libInfo.append(h("div", { style: "color:var(--danger);margin-top:6px" }, "ffmpeg wasn't found, so thumbnails, stills and clips won't work."));
+  }).catch(() => { libInfo.textContent = ""; });
+  loadLib();
+
+  const aboutSec = h("section", {},
+    h("h3", {}, "Where your files live"),
+    h("p", {}, "Everything is stored on this computer in ", h("code", {}, s._data_dir), ". Originals are in media, exports you make are in exports."),
+    DESKTOP ? h("button", { onclick: () => api("/api/desktop/reveal", { method: "POST", body: { what: "library" } }) }, "Show in Finder") : null,
+    h("p", { class: "hint", style: "margin-top:14px" }, `Stash ${s._version || ""}`));
+
+  fill(body, statusSec, importSec, syncSec, appearSec, libSec, aboutSec);
+  renderJobs();
+  if (focus) setTimeout(() => $(`#sec-${focus}`)?.scrollIntoView({ block: "start" }), 50);
+}
+async function startJobs(kinds) {
+  try {
+    await api("/api/jobs", { method: "POST", body: { kinds } });
+    toast(kinds.includes("sync") ? "Sync started" : "Fetching waiting media");
+    pollJobs(true);
+  } catch (e) { toast(esc(e.message), { error: true }); }
+}
+function renderJobs() {
+  const list = $("#jobList");
+  if (list) fill(list, ...S.jobs.slice(0, 5).map((j) => h("div", { class: "job" },
+    h("span", { class: "k" }, j.kind === "sync" ? "Sync" : "Backlog"),
+    h("div", {},
+      h("span", { class: "s-" + j.status }, j.message || j.status),
+      j.status === "running" && j.total ? h("div", { class: "progress" }, h("div", { style: `width:${Math.round((j.done / j.total) * 100)}%` })) : null,
+      j.finished ? h("div", { class: "hint", style: "margin:2px 0 0" }, new Date(j.finished * 1000).toLocaleString()) : null))));
+  const running = S.jobs.find((j) => j.status === "running" || j.status === "queued");
+  const pill = $("#syncPill");
+  pill.classList.toggle("live", !!running);
+  pill.classList.toggle("error", !running && S.jobs[0]?.status === "error");
+  $("#syncText").textContent = running ? (running.kind === "sync" ? "Syncing" : "Fetching") : "Sync";
+}
+let pollTimer, wasRunning = false;
+async function pollJobs(now) {
+  clearTimeout(pollTimer);
+  try {
+    S.jobs = await api("/api/jobs");
+    renderJobs();
+    const running = S.jobs.some((j) => j.status === "running" || j.status === "queued");
+    if (running || wasRunning) loadSidebar();
+    if (wasRunning && !running) { reload(); const last = S.jobs[0]; if (last) toast(esc(last.message), { error: last.status === "error" }); }
+    wasRunning = running;
+    pollTimer = setTimeout(pollJobs, running || !$("#drawer").hidden ? 2500 : 20000);
+  } catch { pollTimer = setTimeout(pollJobs, 20000); }
+}
+
+// ---------------- global wiring ----------------
+let qTimer;
+$("#q").addEventListener("input", () => {
+  clearTimeout(qTimer);
+  qTimer = setTimeout(() => { S.filter.q = $("#q").value.trim(); if (!S.filter.q) delete S.filter.q; writeHash(); reload(); }, 220);
+});
+$("#sort").onchange = () => { S.sort = $("#sort").value; S.seed = Math.floor(Math.random() * 1e6); try { localStorage.setItem("sf-sort", S.sort); } catch {} reload(); };
+$("#density").oninput = () => { try { localStorage.setItem("sf-density", $("#density").value); } catch {} layout(true); };
+$("#menuBtn").onclick = () => $("#side").classList.toggle("open");
+let resizeT; window.addEventListener("resize", () => { clearTimeout(resizeT); resizeT = setTimeout(() => layout(false), 120); });
+new IntersectionObserver((e) => { if (e[0].isIntersecting) loadMore(); }, { rootMargin: "1200px" }).observe($("#sentinel"));
+
+document.addEventListener("keydown", (e) => {
+  if (!$("#board").hidden || $("#modalRoot").children.length) return;
+  const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName);
+  if (!$("#viewer").hidden) {
+    if (typing) { if (e.key === "Escape") document.activeElement.blur(); return; }
+    const k = e.key.toLowerCase();
+    if (k === "escape") closeViewer();
+    else if (k === "arrowright") openViewer(S.viewerIndex + 1);
+    else if (k === "arrowleft") openViewer(S.viewerIndex - 1);
+    else if (k === " ") { e.preventDefault(); togglePlay(); }
+    else if (k === "i") setIn();
+    else if (k === "o") setOut();
+    else if (k === "g") grabFrame();
+    else if (k === ",") step(-1);
+    else if (k === ".") step(1);
+    else if (k === "f" && S.post) $(".fav-btn")?.click();
+    else if (k === "arrowdown" && S.post?.media.length > 1) { e.preventDefault(); S.slide = (S.slide + 1) % S.post.media.length; renderStage(); renderInfo(); }
+    else if (k === "arrowup" && S.post?.media.length > 1) { e.preventDefault(); S.slide = (S.slide - 1 + S.post.media.length) % S.post.media.length; renderStage(); renderInfo(); }
+    return;
+  }
+  if (typing) { if (e.key === "Escape") document.activeElement.blur(); return; }
+  if (e.key === "/") { e.preventDefault(); $("#q").focus(); }
+  else if (e.key === "Escape") { if (!$("#drawer").hidden) closeDrawer(); else clearSelection(); }
+});
+window.addEventListener("hashchange", () => { readHash(); reload(); renderSidebar(); });
+
+const setView = (v) => { S.view = v; try { localStorage.setItem("sf-view", v); } catch {} layout(true); };
+$("#viewIndex").onclick = () => setView("index");
+$("#viewFrames").onclick = () => setView("frames");
+async function searchByImage(file) {
+  if (!file || !file.type.startsWith("image/")) return toast("Drop a JPG or PNG image", { error: true });
+  const fd = new FormData(); fd.append("file", file);
+  try {
+    const r = await api("/api/search-image", { method: "POST", body: fd });
+    if (S.queryImg) URL.revokeObjectURL(S.queryImg);
+    S.queryImg = URL.createObjectURL(file);
+    closeViewer(); updateFilter({ simimg: r.token, similar: null });
+  } catch (e) { toast(esc(e.message), { error: true }); }
+}
+$("#byImage").onclick = () => $("#imageFile").click();
+$("#imageFile").onchange = () => { searchByImage($("#imageFile").files[0]); $("#imageFile").value = ""; };
+let dragDepth = 0;
+const fileDrag = (e) => [...(e.dataTransfer?.types || [])].includes("Files") && $("#drawer").hidden && $("#board").hidden;
+window.addEventListener("dragenter", (e) => { if (!fileDrag(e)) return; dragDepth++; $("#dropzone").hidden = false; });
+window.addEventListener("dragleave", (e) => { if (!fileDrag(e)) return; if (--dragDepth <= 0) { dragDepth = 0; $("#dropzone").hidden = true; } });
+window.addEventListener("dragover", (e) => { if (fileDrag(e)) e.preventDefault(); });
+window.addEventListener("drop", (e) => {
+  if (!fileDrag(e)) return;
+  e.preventDefault(); dragDepth = 0; $("#dropzone").hidden = true;
+  searchByImage(e.dataTransfer.files[0]);
+});
+$("#themeBtn").onclick = () => applyTheme({ auto: "light", light: "dark", dark: "auto" }[getTheme()]);
+applyTheme(getTheme());
+
+// boot
+try {
+  const so = localStorage.getItem("sf-sort"); if (so) { S.sort = so; $("#sort").value = so; }
+  const de = localStorage.getItem("sf-density"); if (de) $("#density").value = de;
+  const vw = localStorage.getItem("sf-view"); if (vw === "frames" || vw === "index") S.view = vw;
+} catch {}
+readHash();
+if (S.filter.simimg) { delete S.filter.simimg; writeHash(); }
+loadSidebar().then(() => { reload(); });
+pollJobs();

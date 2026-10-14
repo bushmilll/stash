@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stash</title>
+<link rel="stylesheet" href="/static/style.css">
+<script>try{var t=localStorage.getItem("sf-theme");if(t==="light"||t==="dark")document.documentElement.dataset.theme=t}catch(e){}</script>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='%23000'/><rect x='6' y='6' width='9' height='9' fill='%23ECEAE5'/><rect x='17' y='6' width='9' height='9' fill='%23ECEAE5'/><rect x='6' y='17' width='9' height='9' fill='%23ECEAE5'/><rect x='17' y='17' width='9' height='9' fill='%23FF4D00'/></svg>">
+</head>
+<body>
+<div class="app">
+  <aside class="side" id="side">
+    <div class="brand">Stash</div>
+    <nav id="nav"></nav>
+  </aside>
+
+  <main class="main">
+    <header class="bar">
+      <button class="cell only-mobile" id="menuBtn">Menu</button>
+      <label class="cell search">
+        <span class="lbl">Search</span>
+        <input id="q" type="search" placeholder="Captions, creators, tags, notes" autocomplete="off">
+        <kbd>/</kbd>
+      </label>
+      <label class="cell hide-mobile"><span class="lbl">Sort</span>
+        <select id="sort">
+          <option value="saved">Newest saves</option>
+          <option value="saved_old">Oldest saves</option>
+          <option value="posted">Newest posts</option>
+          <option value="random">Shuffle</option>
+        </select>
+      </label>
+      <button class="cell hide-mobile" id="byImage" title="Find saves that look like an image (or drop one anywhere)">By image</button>
+      <div class="cell toggle" role="group" aria-label="View">
+        <button id="viewFrames">Frames</button><button id="viewIndex">Index</button>
+      </div>
+      <label class="cell hide-mobile"><span class="lbl">Size</span><input id="density" type="range" min="2" max="9" value="5" aria-label="Grid size"></label>
+      <button class="cell hide-mobile" id="themeBtn"></button>
+      <button class="cell sync-pill" id="syncPill" title="Sync and settings"><span class="dot"></span><span id="syncText">Sync</span></button>
+    </header>
+
+    <div class="scope" id="scope"></div>
+    <div class="filters" id="filters"></div>
+    <section class="grid" id="grid" aria-live="polite"></section>
+    <div class="sentinel" id="sentinel"></div>
+    <div class="empty" id="empty" hidden></div>
+  </main>
+</div>
+
+<div class="selbar" id="selbar" hidden></div>
+<div class="dropzone" id="dropzone" hidden><div>Drop to find saves that look like this</div></div>
+<input type="file" id="imageFile" accept="image/*" hidden>
+<datalist id="collectionList"></datalist>
+<div id="modalRoot"></div>
+
+<!-- moodboard -->
+<div class="board" id="board" hidden>
+  <div class="board-bar">
+    <button class="cell" id="boardClose" title="Back (Esc)">Back</button>
+    <input class="cell title" id="boardTitle" aria-label="Moodboard name">
+    <div class="cell toggle" role="group" aria-label="Arrange">
+      <span class="lbl">Arrange</span>
+      <button id="lySheet">Sheet</button><button id="lyMasonry">Columns</button><button id="lyRows">Rows</button>
+    </div>
+    <label class="cell"><span class="lbl">Space</span><input type="range" id="boardGap" min="0" max="40" value="12" aria-label="Spacing"></label>
+    <div class="cell"><span class="lbl">Ground</span><div class="swatches" id="swatches"></div></div>
+    <button class="cell" id="addNote">Add note</button>
+    <span class="spacer"></span>
+    <button class="cell danger" id="boardDelete">Delete</button>
+    <button class="cell" id="boardPdf">Export PDF</button>
+    <button class="cell primary" id="boardPng">Export PNG</button>
+  </div>
+  <div class="board-scroll" id="boardScroll"><div class="paper-wrap" id="paperWrap"><div class="paper" id="paper"></div></div></div>
+  <div class="board-foot"><span id="boardInfo"></span><span>Drag to move / corner to resize / Delete removes / double-click a note to edit</span></div>
+</div>
+
+<!-- viewer -->
+<div class="viewer" id="viewer" hidden>
+  <div class="stage" id="stage">
+    <div class="frame" id="frame"></div>
+    <div class="slides" id="slides"></div>
+    <div class="deck" id="deck" hidden>
+      <div class="scrub" id="scrub">
+        <div class="range" id="range"></div>
+        <div class="played" id="played"></div>
+        <div class="mark in" id="markIn"></div>
+        <div class="mark out" id="markOut"></div>
+        <div class="head" id="head"></div>
+      </div>
+      <div class="deck-row">
+        <button class="cell" id="play">Play</button>
+        <span class="cell tc" id="tc">00:00.00</span>
+        <button class="cell" id="stepBack" title="Back one frame (,)">− Frame</button>
+        <button class="cell" id="stepFwd" title="Forward one frame (.)">+ Frame</button>
+        <span class="spacer"></span>
+        <button class="cell" id="setIn" title="Set in point (I)">In <span class="tc" id="inTc">–</span></button>
+        <button class="cell" id="setOut" title="Set out point (O)">Out <span class="tc" id="outTc">–</span></button>
+        <button class="cell primary" id="grab" title="Save full-res frame (G)">Grab frame</button>
+      </div>
+    </div>
+  </div>
+  <aside class="info" id="info"></aside>
+</div>
+
+<!-- settings -->
+<div class="drawer-scrim" id="scrim" hidden></div>
+<aside class="drawer" id="drawer" hidden aria-label="Sync and settings">
+  <div class="drawer-head">
+    <h2>Sync and settings</h2>
+    <button class="cell" id="closeDrawer">Close</button>
+  </div>
+  <div class="drawer-body" id="drawerBody"></div>
+</aside>
+
+<div class="toasts" id="toasts"></div>
+<script src="/static/app.js"></script>
+<script src="/static/board.js"></script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+services:
+  stash:
+    build: .
+    ports: ["8765:8765"]
+    volumes: ["./library:/data"]
+    restart: unless-stopped
+# Note: "read login from browser" can't work inside Docker. Export a cookies.txt
+# from your browser, drop it in ./library, and choose "A cookies.txt file" in Settings
+# with the path /data/cookies.txt.

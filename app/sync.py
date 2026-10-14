@@ -1,0 +1,380 @@
+"""Logged-in sync with Instagram via gallery-dl, plus a small background job runner.
+
+Design notes (keeping your account safe):
+  * One job at a time, never in parallel.
+  * gallery-dl waits a random 6-12s between Instagram API requests (configurable).
+  * Feeds are newest-first, so a routine sync stops after N already-downloaded posts in a row
+    instead of paging through all 10k+ saves every time.
+  * If Instagram pushes back (login challenge, rate limit), the job stops instead of retrying.
+"""
+import queue
+import random
+import shutil
+import threading
+import time
+import traceback
+
+import requests
+
+from . import db, media
+
+try:
+    from gallery_dl import config as gdl_config, extractor as gdl_extractor, exception as gdl_exc
+    from gallery_dl.extractor.message import Message
+    HAVE_GDL = True
+except ImportError:  # app still works for browsing without it
+    HAVE_GDL = False
+
+UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/129.0 Safari/537.36")
+
+
+class StopSync(Exception):
+    """Instagram pushed back; stop everything."""
+
+
+class Cancelled(Exception):
+    pass
+
+
+# ---------- job runner ----------
+
+_queue = queue.Queue()
+_current = {"id": None, "cancel": False}
+_last_auto = {"t": 0}
+
+
+def enqueue(kind):
+    with db.tx() as c:
+        busy = c.execute("SELECT id FROM jobs WHERE kind=? AND status IN ('queued','running')", (kind,)).fetchone()
+        if busy:
+            return busy[0]
+        c.execute("INSERT INTO jobs (kind, status, message, started) VALUES (?, 'queued', 'Waiting…', ?)",
+                  (kind, db.now()))
+        jid = c.execute("SELECT last_insert_rowid()").fetchone()[0]
+    _queue.put((jid, kind))
+    return jid
+
+
+def cancel():
+    _current["cancel"] = True
+
+
+def _update(jid, **kw):
+    with db.tx() as c:
+        c.execute(f"UPDATE jobs SET {','.join(f'{k}=?' for k in kw)} WHERE id=?", list(kw.values()) + [jid])
+
+
+def _check_cancel():
+    if _current["cancel"]:
+        raise Cancelled()
+
+
+def _worker():
+    while True:
+        jid, kind = _queue.get()
+        _current.update(id=jid, cancel=False)
+        _update(jid, status="running", message="Starting…")
+        try:
+            fn = {"sync": run_sync, "backfill": run_backfill}[kind]
+            msg = fn(jid)
+            _update(jid, status="done", message=msg, finished=db.now())
+        except Cancelled:
+            _update(jid, status="cancelled", message="Stopped", finished=db.now())
+        except StopSync as e:
+            _update(jid, status="error", message=str(e), finished=db.now())
+        except Exception as e:
+            traceback.print_exc()
+            _update(jid, status="error", message=f"{type(e).__name__}: {e}"[:400], finished=db.now())
+        finally:
+            _current.update(id=None, cancel=False)
+
+
+def _scheduler():
+    first = True
+    while True:
+        if not first:
+            time.sleep(60)
+        first = False
+        try:
+            backups = db.list_backups()
+            if not backups or time.time() - backups[0]["mtime"] > 20 * 3600:
+                db.backup_now()
+            media.cleanup_exports()
+        except Exception:
+            traceback.print_exc()
+        try:
+            s = db.load_settings()
+            hours = float(s.get("auto_sync_hours") or 0)
+            if hours <= 0 or not (s.get("collections") or s.get("instagram_username")):
+                continue
+            row = db.conn().execute(
+                "SELECT MAX(started) FROM jobs WHERE kind='sync'").fetchone()
+            last = row[0] or 0
+            if time.time() - last >= hours * 3600:
+                enqueue("sync")
+                enqueue("backfill")
+        except Exception:
+            traceback.print_exc()
+
+
+def start():
+    # anything left "running" from a previous launch didn't finish
+    with db.tx() as c:
+        c.execute("UPDATE jobs SET status='cancelled', message='Interrupted (app closed)' "
+                  "WHERE status IN ('queued','running')")
+    threading.Thread(target=_worker, daemon=True).start()
+    threading.Thread(target=_scheduler, daemon=True).start()
+
+
+# ---------- gallery-dl setup ----------
+
+def _configure(s):
+    if not HAVE_GDL:
+        raise StopSync("gallery-dl isn't installed. Run: pip install gallery-dl")
+    gdl_config.clear()
+    src = s.get("cookies_source") or "chrome"
+    if src == "file":
+        if not s.get("cookies_file"):
+            raise StopSync("Cookies are set to 'file' but no cookies.txt path is set in Settings.")
+        cookies = s["cookies_file"]
+    else:
+        cookies = [src]  # read the session straight from your browser
+    gdl_config.set(("extractor",), "cookies", cookies)
+    ig = ("extractor", "instagram")
+    gdl_config.set(ig, "videos", "merged")         # plain progressive mp4, no ytdl needed
+    delay = s.get("request_delay") or [6, 12]
+    gdl_config.set(ig, "sleep-request", [float(delay[0]), float(delay[1])])
+
+
+def _friendly(e):
+    name = type(e).__name__
+    text = str(e)
+    low = text.lower()
+    if HAVE_GDL and isinstance(e, (gdl_exc.AuthenticationError, gdl_exc.AuthorizationError)) or "login" in low:
+        return ("Instagram didn't accept the login. Open instagram.com in the browser chosen in Settings, "
+                "make sure you're logged in, then try again.")
+    if "429" in text or "rate" in low or "challenge" in low or "checkpoint" in low:
+        return ("Instagram is rate-limiting or asking for verification. Sync stopped to protect your account. "
+                "Open Instagram, clear any prompt, and wait a few hours before syncing again.")
+    return f"{name}: {text}"[:400]
+
+
+def _feeds(s):
+    feeds = []
+    for col in s.get("collections") or []:
+        url = (col.get("url") or "").strip()
+        if url:
+            feeds.append((url.split("?")[0], (col.get("name") or "").strip() or None))
+    user = (s.get("instagram_username") or "").strip().lstrip("@")
+    if s.get("sync_all_saved") and user:
+        feeds.append((f"https://www.instagram.com/{user}/saved/all-posts/", None))
+    return feeds
+
+
+# ---------- downloading ----------
+
+def _download(url, dest, headers=None, tries=3):
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    last = None
+    for attempt in range(tries):
+        try:
+            with requests.get(url, headers=headers or {"User-Agent": UA}, stream=True, timeout=60) as r:
+                if r.status_code in (403, 404, 410):   # expired or deleted link: retrying won't help
+                    r.raise_for_status()
+                r.raise_for_status()
+                with open(tmp, "wb") as f:
+                    for chunk in r.iter_content(1 << 16):
+                        f.write(chunk)
+            if tmp.stat().st_size == 0:
+                raise IOError("empty download")
+            tmp.replace(dest)
+            return
+        except requests.HTTPError as e:
+            last = e
+            if e.response is not None and e.response.status_code in (403, 404, 410):
+                break
+        except (requests.RequestException, IOError) as e:
+            last = e
+        time.sleep(2 * (attempt + 1))
+    tmp.unlink(missing_ok=True)
+    raise last or IOError("download failed")
+
+
+def _save_post(post, files, collection=None):
+    """post: gallery-dl metadata dict; files: [(url, filedict)]. Downloads media and records the post."""
+    code = post.get("post_shortcode") or post.get("shortcode")
+    if not code:
+        return None
+    folder = db.MEDIA_DIR / code
+    folder.mkdir(parents=True, exist_ok=True)
+    saved = []
+    for i, (url, f) in enumerate(files):
+        _check_cancel()
+        if url.startswith("ytdl:"):
+            fb = f.get("_fallback") or ()
+            if not fb:
+                continue
+            url = fb[0]
+        ext = (f.get("extension") or "jpg").lower()
+        dest = folder / f"{i + 1:02d}.{ext}"
+        if not dest.exists():
+            _download(url, dest, f.get("_http_headers") or None)
+        saved.append(dest)
+
+    date = post.get("post_date") or post.get("date")
+    posted_at = int(date.timestamp()) if hasattr(date, "timestamp") else None
+    with db.tx() as c:
+        pid = db.upsert_post(
+            c, code,
+            url=f"https://www.instagram.com/p/{code}/",
+            username=post.get("username") or "",
+            caption=post.get("description") or "",
+            posted_at=posted_at,
+            saved_at=db.now(),
+            status="ready", error="",
+        )
+        # a post's caption/author from the live feed beats what the export had
+        c.execute("UPDATE posts SET caption=COALESCE(NULLIF(?, ''), caption), "
+                  "username=COALESCE(NULLIF(?, ''), username), posted_at=COALESCE(?, posted_at) WHERE id=?",
+                  (post.get("description") or "", post.get("username") or "", posted_at, pid))
+        for i, path in enumerate(saved):
+            media.ingest_file(c, pid, code, i, path)
+        media.refresh_post_kind(c, pid)
+        if collection:
+            db.add_to_collection(c, pid, collection, source="instagram")
+        db.reindex(c, pid)
+    return code
+
+
+def _iter_posts(url):
+    """Yield (post_meta, [(file_url, file_meta), ...]) for each post in a feed, lazily."""
+    ex = gdl_extractor.find(url)
+    if ex is None:
+        raise StopSync(f"That doesn't look like an Instagram saved/collection URL: {url}")
+    post, files = None, []
+    for msg in ex:
+        if msg[0] == Message.Directory:
+            if post is not None:
+                yield post, files
+            post, files = msg[-1], []
+        elif msg[0] == Message.Url:
+            files.append((msg[1], msg[2]))
+    if post is not None:
+        yield post, files
+
+
+def _blocking(msg):
+    """True if this failure means Instagram is pushing back (stop everything) rather than a one-off."""
+    low = msg.lower()
+    return any(k in low for k in ("rate-limiting", "didn't accept the login", "challenge", "checkpoint", "429"))
+
+
+def _status(code):
+    r = db.conn().execute("SELECT id, status FROM posts WHERE shortcode=?", (code,)).fetchone()
+    return (r["id"], r["status"]) if r else (None, None)
+
+
+def run_sync(jid):
+    s = db.load_settings()
+    _configure(s)
+    feeds = _feeds(s)
+    if not feeds:
+        raise StopSync("Nothing to sync yet. Add your Instagram username and/or collection links in Settings.")
+    stop_after = int(s.get("stop_after_known") or 30)
+    new_total, linked, failed_posts = 0, 0, 0
+    for fi, (url, name) in enumerate(feeds):
+        label = name or ("All saved" if "all-posts" in url else url)
+        known_streak, seen = 0, 0
+        try:
+            for post, files in _iter_posts(url):
+                _check_cancel()
+                seen += 1
+                code = post.get("post_shortcode")
+                col = name or post.get("collection_name")
+                pid, status = _status(code)
+                if status in ("ready", "removed"):
+                    known_streak += 1
+                    if col and status == "ready":
+                        with db.tx() as c:
+                            before = c.total_changes
+                            db.add_to_collection(c, pid, col, source="instagram")
+                            if c.total_changes > before:
+                                linked += 1
+                                db.reindex(c, pid)
+                    if known_streak >= stop_after:
+                        break
+                else:
+                    known_streak = 0
+                    try:
+                        _save_post(post, files, col)
+                        new_total += 1
+                    except (Cancelled, StopSync):
+                        raise
+                    except Exception as e:
+                        # one bad post shouldn't stop the whole run: park it for the backlog fetcher
+                        msg = _friendly(e)
+                        if _blocking(msg):
+                            raise StopSync(f"{label}: {msg}")
+                        failed_posts += 1
+                        with db.tx() as c:
+                            db.upsert_post(c, code, username=post.get("username") or "", status="failed", error=msg[:300])
+                _update(jid, done=fi, total=len(feeds),
+                        message=f"{label}: {seen} checked, {new_total} new so far")
+        except (Cancelled, StopSync):
+            raise
+        except Exception as e:
+            raise StopSync(f"{label}: {_friendly(e)}")
+    msg = f"Synced {len(feeds)} feed(s): {new_total} new post(s)"
+    if linked:
+        msg += f", {linked} collection link(s) updated"
+    if failed_posts:
+        msg += f", {failed_posts} couldn't be downloaded and will be retried"
+    return msg
+
+
+def run_backfill(jid):
+    """Fetch media for posts we only know about from the data export (one request per post, slowly)."""
+    s = db.load_settings()
+    _configure(s)
+    limit = int(s.get("backfill_per_run") or 150)
+    rows = db.conn().execute(
+        "SELECT id, shortcode FROM posts WHERE status IN ('pending','failed') AND attempts < 3 "
+        "ORDER BY saved_at DESC LIMIT ?", (limit,)).fetchall()
+    if not rows:
+        return "Nothing to backfill, every post has its media"
+    delay = s.get("request_delay") or [6, 12]
+    ok = gone = failed = 0
+    for i, r in enumerate(rows):
+        _check_cancel()
+        _update(jid, done=i, total=len(rows), message=f"Fetching {i + 1} of {len(rows)} (export backlog)")
+        try:
+            got = False
+            for post, files in _iter_posts(f"https://www.instagram.com/p/{r['shortcode']}/"):
+                if _save_post(post, files):
+                    got = True
+            if got:
+                ok += 1
+            else:
+                raise gdl_exc.NotFoundError("post")
+        except Cancelled:
+            raise
+        except Exception as e:
+            is_gone = HAVE_GDL and isinstance(e, gdl_exc.NotFoundError)
+            msg = _friendly(e)
+            with db.tx() as c:
+                c.execute("UPDATE posts SET status=?, error=?, attempts=attempts+1 WHERE id=?",
+                          ("gone" if is_gone else "failed", "Post deleted or private" if is_gone else msg, r["id"]))
+            if is_gone:
+                gone += 1
+            else:
+                failed += 1
+                if "rate-limiting" in msg or "didn't accept the login" in msg:
+                    raise StopSync(msg)
+        # one request per post: pace them like a person scrolling
+        for _ in range(int(random.uniform(float(delay[0]), float(delay[1])) * 2)):
+            _check_cancel()
+            time.sleep(0.5)
+    left = db.conn().execute(
+        "SELECT COUNT(*) FROM posts WHERE status IN ('pending','failed') AND attempts < 3").fetchone()[0]
+    return f"Backfill: {ok} downloaded, {gone} unavailable, {failed} failed · {left} still waiting"
