@@ -13,7 +13,7 @@ from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from . import analyze, db, importer, media, storage, sync
+from . import ai, analyze, db, importer, media, storage, sync
 
 STATIC = Path(__file__).parent / "static"
 SORTS = {
@@ -74,8 +74,15 @@ async def list_posts(request):
         where.append("p.favorite=1")
     # look filters (computed from the pixels of the cover image)
     look = {k: qp.get(k) for k in ("tone", "sat", "temp", "contrast", "ar") if qp.get(k)}
-    if look:
+    content = qp.get("content")
+    if look or content:
         joins.append("JOIN media cm ON cm.post_id=p.id AND cm.idx=0 JOIN analysis a ON a.media_id=cm.id")
+    if content == "notfilm":
+        where.append("COALESCE(a.content_user, a.content) IS NOT NULL AND COALESCE(a.content_user, a.content) != 'film'")
+    elif content:
+        where.append("COALESCE(a.content_user, a.content) = ?")
+        args.append(content)
+    if look:
         col = {"tone": "a.tone", "sat": "a.sat", "temp": "a.temp", "contrast": "a.contrast", "ar": "a.ar_label"}
         for k, v in look.items():
             vals = v.split(",")
@@ -109,6 +116,8 @@ async def list_posts(request):
                 ids = [i for s_, i in scored if s_ >= 0.08]
             else:
                 ids = [i for s_, i in sorted(scored, key=lambda t: -t[0]) if s_ >= 0.08]
+        if qp.get("ids_only"):
+            return JSONResponse({"ids": ids[:20000]})
         c = db.conn()
         page = ids[offset:offset + limit]
         rows = {r["id"]: r for r in c.execute(f"SELECT * FROM posts WHERE id IN ({','.join('?' * len(page))})", page)} if page else {}
@@ -119,6 +128,11 @@ async def list_posts(request):
         # stable shuffle across pages
         seed = int(qp["seed"]) % 100003
         order = f"(p.id * 2654435761 + {seed}) % 1000003"
+    if qp.get("ids_only"):   # "Select all" in the current view
+        ids = [r[0] for r in db.conn().execute(
+            f"SELECT p.id FROM posts p {' '.join(joins)} {'WHERE ' + ' AND '.join(where) if where else ''} "
+            f"ORDER BY {order} LIMIT 20000", args)]
+        return JSONResponse({"ids": ids})
     sql = (f"SELECT p.* FROM posts p {' '.join(joins)} "
            f"{'WHERE ' + ' AND '.join(where) if where else ''} ORDER BY {order} LIMIT ? OFFSET ?")
     c = db.conn()
@@ -378,6 +392,10 @@ async def facets(request):
             f"SELECT a.{col}, COUNT(*) FROM posts p JOIN media m ON m.post_id=p.id AND m.idx=0 "
             f"JOIN analysis a ON a.media_id=m.id WHERE p.deleted_at IS NULL AND p.status='ready' AND a.{col} IS NOT NULL "
             f"GROUP BY a.{col}")}
+    out["content"] = {r[0]: r[1] for r in c.execute(
+        "SELECT COALESCE(a.content_user, a.content), COUNT(*) FROM posts p JOIN media m ON m.post_id=p.id AND m.idx=0 "
+        "JOIN analysis a ON a.media_id=m.id WHERE p.deleted_at IS NULL AND p.status='ready' "
+        "AND COALESCE(a.content_user, a.content) IS NOT NULL GROUP BY 1")}
     out["pending"] = len(analyze.pending(100000))
     return JSONResponse(out)
 
@@ -475,6 +493,33 @@ async def open_url(request):
         return err(400, "Only Instagram and GitHub links open from here.")
     import webbrowser
     webbrowser.open(url)
+    return JSONResponse({"ok": True})
+
+
+# ---------- on-device AI tags ----------
+
+async def ai_status(request):
+    return JSONResponse(await run_in_threadpool(ai.status))
+
+
+async def ai_toggle(request):
+    body = await request.json()
+    if body.get("enabled"):
+        ai.start_download()
+    else:
+        db.save_settings({"ai_enabled": False})
+    return JSONResponse(await run_in_threadpool(ai.status))
+
+
+async def set_content(request):
+    """Correct an AI label by hand (wins over the model, survives re-tagging)."""
+    mid = request.path_params["id"]
+    val = (await request.json()).get("content") or None
+    if val not in (None, *ai.LABELS):
+        return err(400, "Unknown label")
+    with db.tx() as c:
+        c.execute("INSERT INTO analysis (media_id, version) VALUES (?, 0) ON CONFLICT(media_id) DO NOTHING", (mid,))
+        c.execute("UPDATE analysis SET content_user=? WHERE media_id=?", (val, mid))
     return JSONResponse({"ok": True})
 
 
@@ -740,6 +785,8 @@ def create_app():
         Route("/api/export", export_batch, methods=["POST"]),
         Route("/api/search-image", search_image, methods=["POST"]),
         Route("/api/facets", facets),
+        Route("/api/ai", ai_status),
+        Route("/api/ai/toggle", ai_toggle, methods=["POST"]),
         Route("/api/desktop/save", save_to_downloads, methods=["POST"]),
         Route("/api/desktop/save-blob", save_blob, methods=["POST"]),
         Route("/api/desktop/reveal", reveal, methods=["POST"]),
@@ -759,6 +806,7 @@ def create_app():
         Route("/api/sidebar", sidebar),
         Route("/api/collections", create_collection, methods=["POST"]),
         Route("/api/collections/rename", rename_collection, methods=["POST"]),
+        Route("/api/media/{id:int}/content", set_content, methods=["POST"]),
         Route("/api/media/{id:int}/download", download_media),
         Route("/api/media/{id:int}/{action}", tool, methods=["POST"]),
         Route("/api/import", upload_export, methods=["POST"]),

@@ -7,3 +7,5 @@ requests>=2.31
 gallery-dl>=1.30
 imageio-ffmpeg>=0.5
 pywebview>=5.3; sys_platform == "darwin"
+onnxruntime>=1.17
+tokenizers>=0.15

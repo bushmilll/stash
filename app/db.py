@@ -165,6 +165,11 @@ def init():
         if "hq" not in mcols:
             c.execute("ALTER TABLE media ADD COLUMN hq INTEGER DEFAULT 0")  # 1 = best quality Instagram offers
         c.execute("CREATE INDEX IF NOT EXISTS posts_deleted ON posts(deleted_at)")
+        acols = {r[1] for r in c.execute("PRAGMA table_info(analysis)")}
+        for col, typ in (("content", "TEXT"), ("content_conf", "REAL"), ("clip", "BLOB"),
+                         ("ai_version", "INTEGER"), ("content_user", "TEXT")):
+            if col not in acols:
+                c.execute(f"ALTER TABLE analysis ADD COLUMN {col} {typ}")
         c.commit()
 
 
@@ -257,7 +262,8 @@ def post_dict(c, row, full=False):
     d = dict(row)
     media = [dict(m) for m in c.execute(
         "SELECT m.id, m.idx, m.kind, m.path, m.thumb, m.poster, m.width, m.height, m.duration, m.hq, "
-        "a.palette, a.tone, a.sat, a.temp, a.contrast, a.ar, a.ar_label, a.crop "
+        "a.palette, a.tone, a.sat, a.temp, a.contrast, a.ar, a.ar_label, a.crop, "
+        "COALESCE(a.content_user, a.content) AS content, a.content_user IS NOT NULL AS content_fixed "
         "FROM media m LEFT JOIN analysis a ON a.media_id=m.id WHERE m.post_id=? ORDER BY m.idx",
         (row["id"],))]
     for m in media:
@@ -293,6 +299,7 @@ DEFAULT_SETTINGS = {
     "stop_after_known": 30,              # incremental sync: stop a feed after this many already-known posts in a row
     "backfill_per_run": 150,             # max export-only posts to fetch per backfill run
     "request_delay": [6, 12],            # seconds between Instagram API requests (random in range)
+    "ai_enabled": False,                 # on-device AI tags (model downloaded on first use)
     "rank_version": 0,                   # 1 = save order has been rebuilt from the collection feeds
     "media_dir": "",                     # where originals live; empty = inside the library folder
     "media_move_from": "",               # a move in progress (resumes if the app was closed)

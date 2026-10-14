@@ -144,7 +144,8 @@ const S = {
   inPt: null, outPt: null, settings: null, jobs: [], view: "frames", facets: null, queryImg: null,
 };
 const NAV_KEYS = ["collection", "tag", "creator", "kind", "favorite", "uncollected", "status", "trashed"];
-const LOOK_KEYS = ["color", "tone", "sat", "temp", "contrast", "ar"];
+const LOOK_KEYS = ["content", "color", "tone", "sat", "temp", "contrast", "ar"];
+const CONTENT = [["film", "Film frames"], ["notfilm", "Not film frames"], ["talking", "Talking to camera"], ["bts", "Behind the scenes"], ["gear", "Gear & products"], ["text", "Text & graphics"]];
 const RANK_KEYS = ["similar", "simimg"];
 const LOOK = {
   tone: ["Tone", [["low", "Low key"], ["mid", "Mid key"], ["high", "High key"]]],
@@ -179,6 +180,7 @@ function setFilter(f, keepQuery = true) {
 // ---------------- sidebar ----------------
 async function loadSidebar() {
   api("/api/facets").then((f) => { S.facets = f; renderFilters(); }).catch(() => {});
+  api("/api/ai").then((a) => { S.aiOn = a.enabled && a.installed; }).catch(() => {});
   S.side = await api("/api/sidebar");
   renderSidebar();
   fill($("#collectionList"), ...S.side.collections.map((c) => h("option", { value: c.name })));
@@ -264,6 +266,7 @@ function renderScope() {
   else if (f.status === "pending") title = "Waiting for media";
   else if (f.status === "gone") title = "No longer on Instagram";
   else if (f.trashed) title = "Trash";
+  if (f.content && !f.collection && !f.tag && !f.creator) title = CONTENT.find(([v]) => v === f.content)?.[1] || title;
   if (f.similar) title = "Similar shots";
   if (f.simimg) title = "Looks like this";
   const h1 = h("h1", {}, title);
@@ -273,6 +276,13 @@ function renderScope() {
   if (f.simimg && S.queryImg) meta.unshift(h("img", { class: "query-img", src: S.queryImg, alt: "Your search image" }));
   if (f.similar || f.simimg) meta.push(h("div", { class: "stat" }, h("span", { class: "lbl" }, "Ranked by"), h("b", {}, "composition + color")));
   meta.push(h("span", { class: "spacer" }));
+  if (S.total) meta.push(h("button", { title: "Select everything in this view, then add to a collection, export or trash", onclick: async () => {
+    const p = new URLSearchParams({ ...S.filter, sort: S.sort, ids_only: 1 });
+    const r = await api("/api/posts?" + p);
+    r.ids.forEach((id) => S.selected.add(id));
+    document.querySelectorAll(".tile").forEach((t) => t.classList.toggle("sel", S.selected.has(Number(t.dataset.id))));
+    renderSelbar();
+  } }, `Select all ${S.total.toLocaleString()}`));
   if (f.collection) meta.push(
     h("button", { onclick: boardFromCollection }, "Open as moodboard"),
     h("button", { onclick: () => exportDialog({ collection: f.collection, count: S.total }) }, "Export"),
@@ -301,6 +311,16 @@ function renderFilters() {
   custom.onchange = () => updateFilter({ color: custom.value });
   sw.append(custom);
   if (f.color && !SWATCHES.includes(f.color)) sw.append(h("button", { class: "on", style: `background:${f.color}`, title: "Clear color", onclick: () => updateFilter({ color: null }) }));
+  const cc = fc.content || {};
+  const ccTotal = Object.values(cc).reduce((a, b) => a + b, 0);
+  const contentSel = ccTotal || f.content ? (() => {
+    const counts = { ...cc, notfilm: ccTotal - (cc.film || 0) };
+    const sel = h("select", { class: f.content ? "on" : "", "aria-label": "Content (AI)" },
+      h("option", { value: "" }, "Content"),
+      ...CONTENT.map(([v, l]) => h("option", { value: v, selected: f.content === v }, `${l}  ${pad(counts[v] || 0)}`)));
+    sel.onchange = () => updateFilter({ content: sel.value || null });
+    return h("label", { class: "cell", title: "What each save shows, tagged by AI on your Mac" }, sel);
+  })() : null;
   const selects = Object.entries(LOOK).map(([k, [label, opts]]) => {
     const counts = fc[k] || {};
     const sel = h("select", { class: f[k] ? "on" : "", "aria-label": label },
@@ -311,6 +331,7 @@ function renderFilters() {
   });
   const active = LOOK_KEYS.some((k) => f[k]);
   fill($("#filters"),
+    contentSel,
     h("div", { class: "cell" }, h("span", { class: "lbl" }, "Color"), sw),
     ...selects,
     h("span", { class: "spacer" }),
@@ -762,6 +783,13 @@ function renderInfo() {
       ...spec("Format", m ? `${m.kind === "video" ? "Video" : "Image"} ${m.width || "?"}×${m.height || "?"}${isVideo ? " " + fmtTime(m.duration) : ""}`.toUpperCase() : "Not downloaded"),
       ...(p.media.length > 1 ? spec("Item", `${pad(S.slide + 1, 2)} / ${pad(p.media.length, 2)}`) : []),
       ...spec("Source", h("a", { href: p.url, onclick: (e) => { e.preventDefault(); openExternal(p.url); } }, "Instagram ↗")),
+      ...(m && m.content !== undefined && (m.content || S.aiOn) ? spec("Content", (() => {
+        const sel = h("select", { style: "font:inherit;text-transform:uppercase;border:0;padding:0", title: m.content_fixed ? "Set by you" : "Tagged by AI. Change it if it's wrong." },
+          ...(m.content ? [] : [h("option", { value: "" }, "Not tagged yet")]),
+          ...CONTENT.filter(([v]) => v !== "notfilm").map(([v, l]) => h("option", { value: v, selected: m.content === v }, l + (m.content === v && !m.content_fixed ? " (AI)" : ""))));
+        sel.onchange = async () => { await api(`/api/media/${m.id}/content`, { method: "POST", body: { content: sel.value } }); toast("Label updated"); S.post = await api(`/api/posts/${p.id}`); renderInfo(); };
+        return sel;
+      })()) : []),
       ...(m && m.tone ? [
         ...spec("Aspect", lookLink("ar", m.ar_label, m.ar_label)),
         ...spec("Look", h("span", {}, lookLink("tone", m.tone, LOOK.tone[1].find((o) => o[0] === m.tone)?.[1]), " / ",
@@ -960,6 +988,27 @@ function renderDrawer(focus) {
   }).catch((e) => fill(storBody, h("p", { class: "hint" }, esc(e.message))));
   loadStorage();
 
+  const aiBody = h("div", {}, h("div", { class: "stat-line" }, "…"));
+  const aiSec = h("section", { id: "sec-ai" }, h("h3", {}, "AI tags"),
+    h("p", {}, "Stash can tell what each save shows: real film frames, someone talking to camera, behind the scenes, gear, or text and graphics. Then use the Content filter, like “Not film frames” in your Cinematography collection. It runs entirely on this Mac. Turning it on downloads a 150 MB model once."),
+    aiBody);
+  let aiTimer;
+  const loadAI = () => api("/api/ai").then((a) => {
+    clearTimeout(aiTimer);
+    S.aiOn = a.enabled && a.installed;
+    const line = a.downloading ? `Downloading model… ${Math.round(a.progress * 100)}%`
+      : a.enabled && a.installed ? `Tagged ${a.tagged.toLocaleString()} of ${a.total.toLocaleString()} saves` + (a.tagged < a.total ? " (keeps going in the background)" : "")
+      : "Off";
+    fill(aiBody,
+      h("div", { class: "stat-line" }, line),
+      a.error ? h("p", { style: "color:var(--danger)" }, a.error) : null,
+      a.enabled && (a.installed || a.downloading)
+        ? h("button", { onclick: async () => { await api("/api/ai/toggle", { method: "POST", body: { enabled: false } }); loadAI(); } }, "Turn off")
+        : h("button", { class: "primary", onclick: async () => { await api("/api/ai/toggle", { method: "POST", body: { enabled: true } }); toast("Downloading the AI model"); loadAI(); } }, "Turn on AI tags"));
+    if (!$("#drawer").hidden && (a.downloading || (a.enabled && a.installed && a.tagged < a.total))) aiTimer = setTimeout(loadAI, 3000);
+  }).catch(() => fill(aiBody));
+  loadAI();
+
   const libInfo = h("div", { class: "stat-line" }, "Checking library…");
   const libSec = h("section", {}, h("h3", {}, "Library"),
     h("p", {}, "Stash backs up your library's database once a day and keeps the last 7. Your photos and videos stay in the folder below; they aren't copied into backups."),
@@ -988,7 +1037,7 @@ function renderDrawer(focus) {
     DESKTOP ? h("button", { onclick: () => api("/api/desktop/reveal", { method: "POST", body: { what: "library" } }) }, "Show in Finder") : null,
     h("p", { class: "hint", style: "margin-top:14px" }, `Stash ${s._version || ""}`));
 
-  fill(body, statusSec, importSec, syncSec, storSec, appearSec, libSec, aboutSec);
+  fill(body, statusSec, importSec, syncSec, storSec, aiSec, appearSec, libSec, aboutSec);
   renderJobs();
   if (focus) setTimeout(() => $(`#sec-${focus}`)?.scrollIntoView({ block: "start" }), 50);
 }

@@ -143,8 +143,10 @@ def analyze_media(c, media_id):
         src = db.media_path(r["path"])
     res = analyze_file(src)
     c.execute(
-        "INSERT OR REPLACE INTO analysis (media_id, palette, tone, sat, temp, contrast, ar, ar_label, crop, lum, chroma, vec, version) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO analysis (media_id, palette, tone, sat, temp, contrast, ar, ar_label, crop, lum, chroma, vec, version) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(media_id) DO UPDATE SET palette=excluded.palette, tone=excluded.tone, "
+        "sat=excluded.sat, temp=excluded.temp, contrast=excluded.contrast, ar=excluded.ar, ar_label=excluded.ar_label, "
+        "crop=excluded.crop, lum=excluded.lum, chroma=excluded.chroma, vec=excluded.vec, version=excluded.version",
         (media_id, json.dumps(res["palette"]), res["tone"], res["sat"], res["temp"], res["contrast"], res["ar"],
          res["ar_label"], json.dumps(res["crop"]), res["lum"], res["chroma"], res["vec"].tobytes(), VERSION))
 
@@ -178,7 +180,14 @@ def _worker():
             _backfill_posters()
             ids = pending()
             if not ids:
-                time.sleep(20)
+                from . import ai
+                try:
+                    tagged = ai.tag_batch()
+                except Exception:
+                    traceback.print_exc()
+                    tagged = 0
+                if not tagged:
+                    time.sleep(10)
                 continue
             for mid in ids:
                 try:
@@ -187,7 +196,7 @@ def _worker():
                 except Exception:
                     traceback.print_exc()
                     with db.tx() as c:  # don't retry a broken file forever
-                        c.execute("INSERT OR REPLACE INTO analysis (media_id, version, tone) VALUES (?,?,?)", (mid, VERSION, None))
+                        c.execute("INSERT INTO analysis (media_id, version) VALUES (?,?) ON CONFLICT(media_id) DO UPDATE SET version=excluded.version", (mid, VERSION))
         except Exception:
             traceback.print_exc()
             time.sleep(30)

@@ -1,7 +1,7 @@
 # PyInstaller recipe for Stash.app. Built by .github/workflows/build-mac.yml on GitHub's Macs.
 import os
 import imageio_ffmpeg
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 VERSION = os.environ.get("STASH_VERSION", "0.1.0")
@@ -15,6 +15,10 @@ hidden = (
 datas = [(os.path.join(ROOT, "app", "static"), "app/static")] + collect_data_files("webview")
 ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
 binaries = [(ffmpeg, "imageio_ffmpeg/binaries")]
+for pkg in ("onnxruntime", "tokenizers"):          # on-device AI tags
+    d, b, h = collect_all(pkg)
+    datas += d; binaries += b; hidden += h
+hidden += ["app.ai", "app.storage"]
 
 a = Analysis(
     [os.path.join(ROOT, "stash_app.py")],

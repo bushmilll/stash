@@ -44,8 +44,14 @@ jobs:
           open(p, "w").write(f'__version__ = "{os.environ["STASH_VERSION"]}"\n')
           PY
 
+      - name: Cache the AI model used by the tests
+        uses: actions/cache@v4
+        with:
+          path: ~/stash-test-model
+          key: clip-vit-b32-q-v1
+
       - name: Test the app before packaging
-        run: STASH_SELFTEST=1 STASH_DATA="$RUNNER_TEMP/test-lib" STASH_PORT=8790 python stash_app.py
+        run: STASH_SELFTEST=1 STASH_AI_TEST=1 STASH_MODEL_DIR="$HOME/stash-test-model" STASH_DATA="$RUNNER_TEMP/test-lib" STASH_PORT=8790 python stash_app.py
 
       - name: App icon
         run: |
@@ -63,7 +69,7 @@ jobs:
         run: codesign --force --deep --sign - dist/Stash.app
 
       - name: Test the packaged app
-        run: STASH_SELFTEST=1 STASH_DATA="$RUNNER_TEMP/test-lib-2" STASH_PORT=8791 ./dist/Stash.app/Contents/MacOS/Stash
+        run: STASH_SELFTEST=1 STASH_AI_TEST=1 STASH_MODEL_DIR="$HOME/stash-test-model" STASH_DATA="$RUNNER_TEMP/test-lib-2" STASH_PORT=8791 ./dist/Stash.app/Contents/MacOS/Stash
 
       - name: Make the .dmg
         run: |
