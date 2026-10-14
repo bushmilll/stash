@@ -15,7 +15,7 @@ from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from . import ai, analyze, db, importer, media, storage, sync
+from . import ai, analyze, db, importer, media, storage, sync, updater
 
 STATIC = Path(__file__).parent / "static"
 SORTS = {
@@ -536,6 +536,14 @@ async def open_url(request):
 
 # ---------- on-device AI tags ----------
 
+async def update(request):
+    if request.method == "POST":
+        if not updater.app_bundle():
+            return err(400, "Updating only works in the Stash Mac app")
+        updater.start_install()
+    return JSONResponse(updater.status(force=request.query_params.get("force") == "1"))
+
+
 async def ai_status(request):
     return JSONResponse(await run_in_threadpool(ai.status))
 
@@ -727,6 +735,10 @@ def _board_items(c, raw):
 
 def _board_dict(c, r, with_items=True):
     d = {"id": r["id"], "name": r["name"], "bg": r["bg"], "width": r["width"], "gap": r["gap"]}
+    try:
+        d["settings"] = json.loads(r["settings"] or "{}")
+    except Exception:
+        d["settings"] = {}
     if with_items:
         d["items"] = _board_items(c, r["items"])
     return d
@@ -772,12 +784,16 @@ async def board_one(request):
             w.execute("DELETE FROM boards WHERE id=?", (bid,))
         return JSONResponse({"ok": True})
     body = await request.json()   # PUT
-    keep = ("type", "media_id", "x", "y", "w", "z", "h", "text", "size", "color", "fit", "num", "font", "auto", "role")
+    # media: order in the list is the order in Sheet / Columns / Rows; cx/cy/cw/ch/rot is its Collage spot
+    keep = ("type", "media_id", "x", "y", "w", "z", "h", "text", "size", "color", "font", "cx", "cy", "cw", "ch", "rot")
     items = [{k: it[k] for k in keep if k in it} for it in body.get("items", [])][:500]
+    allowed = {"layout": str, "show_title": bool, "title_pos": str, "captions": bool, "tile_ar": str, "fill": bool, "tilt": bool}
+    settings = {k: v for k, v in (body.get("settings") or {}).items() if k in allowed and isinstance(v, allowed[k])}
     with db.tx() as w:
-        w.execute("UPDATE boards SET name=?, bg=?, width=?, gap=?, items=?, updated_at=? WHERE id=?",
+        w.execute("UPDATE boards SET name=?, bg=?, width=?, gap=?, items=?, settings=?, updated_at=? WHERE id=?",
                   ((body.get("name") or r["name"]).strip()[:120], body.get("bg", r["bg"]),
-                   int(body.get("width", r["width"])), int(body.get("gap", r["gap"])), json.dumps(items), db.now(), bid))
+                   int(body.get("width", r["width"])), int(body.get("gap", r["gap"])), json.dumps(items),
+                   json.dumps(settings), db.now(), bid))
     return JSONResponse({"ok": True})
 
 
@@ -855,6 +871,7 @@ def create_app():
         Route("/api/search-image", search_image, methods=["POST"]),
         Route("/api/facets", facets),
         Route("/api/ai", ai_status),
+        Route("/api/update", update, methods=["GET", "POST"]),
         Route("/api/ai/toggle", ai_toggle, methods=["POST"]),
         Route("/api/desktop/save", save_to_downloads, methods=["POST"]),
         Route("/api/desktop/save-blob", save_blob, methods=["POST"]),

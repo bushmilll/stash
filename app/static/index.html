@@ -37,6 +37,7 @@
       </div>
       <label class="cell hide-mobile"><span class="lbl">Size</span><input id="density" type="range" min="2" max="9" value="6" aria-label="Tile size"></label>
       <button class="cell hide-mobile" id="themeBtn"></button>
+      <button class="cell update-pill" id="updateBtn" hidden title="A newer version of Stash is ready">Update</button>
       <button class="cell sync-pill" id="syncPill" title="Sync and settings"><span class="dot"></span><span id="syncText">Sync</span></button>
     </header>
 
@@ -61,18 +62,27 @@
     <input class="cell title" id="boardTitle" aria-label="Moodboard name">
     <div class="cell toggle" role="group" aria-label="Arrange">
       <span class="lbl">Arrange</span>
-      <button id="lySheet">Sheet</button><button id="lyMasonry">Columns</button><button id="lyRows">Rows</button>
+      <button data-ly="sheet">Sheet</button><button data-ly="masonry">Columns</button><button data-ly="rows">Rows</button><button data-ly="collage">Collage</button>
     </div>
-    <label class="cell"><span class="lbl">Space</span><input type="range" id="boardGap" min="0" max="40" value="12" aria-label="Spacing"></label>
-    <div class="cell"><span class="lbl">Ground</span><div class="swatches" id="swatches"></div></div>
-    <button class="cell" id="addNote">Add note</button>
     <span class="spacer"></span>
     <button class="cell danger" id="boardDelete">Delete</button>
     <button class="cell" id="boardPdf">Export PDF</button>
     <button class="cell primary" id="boardPng">Export PNG</button>
   </div>
+  <div class="board-bar board-opts">
+    <div class="cell toggle" role="group" aria-label="Title"><span class="lbl">Title</span><button data-title="top">Top</button><button data-title="bottom">Bottom</button><button data-title="off">Off</button></div>
+    <div class="cell toggle" role="group" aria-label="Captions" data-only="sheet"><span class="lbl">Captions</span><button data-cap="1">On</button><button data-cap="0">Off</button></div>
+    <div class="cell toggle" role="group" aria-label="Tile shape" data-only="sheet"><span class="lbl">Tiles</span><button data-ar="orig" title="The standard 4:5 sheet">Original</button><button data-ar="3:2">3:2</button><button data-ar="16:9">16:9</button><button data-ar="9:16">9:16</button></div>
+    <div class="cell toggle" role="group" aria-label="Images" data-only="sheet"><span class="lbl">Images</span><button data-fill="0" title="Show the whole image inside its tile">Fit</button><button data-fill="1" title="Crop the image to fill its tile">Fill</button></div>
+    <div class="cell toggle" role="group" aria-label="Tilt" data-only="collage"><span class="lbl">Tilt</span><button data-tilt="0">Off</button><button data-tilt="1">On</button></div>
+    <button class="cell" id="boardShuffle" data-only="collage" title="Scatter the posts into a new arrangement">Shuffle</button>
+    <label class="cell"><span class="lbl">Space</span><input type="range" id="boardGap" min="0" max="40" value="12" aria-label="Spacing"></label>
+    <div class="cell"><span class="lbl">Ground</span><div class="swatches" id="swatches"></div></div>
+    <button class="cell" id="addNote">Add note</button>
+    <span class="spacer"></span>
+  </div>
   <div class="board-scroll" id="boardScroll"><div class="paper-wrap" id="paperWrap"><div class="paper" id="paper"></div></div></div>
-  <div class="board-foot"><span id="boardInfo"></span><span>Drag to move / corner to resize / Delete removes / double-click a note to edit</span></div>
+  <div class="board-foot"><span id="boardInfo"></span><span id="boardHint"></span></div>
 </div>
 
 <!-- viewer -->

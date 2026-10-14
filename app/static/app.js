@@ -867,6 +867,18 @@ function renderDrawer(focus) {
       c.lowq ? h("button", { onclick: () => startJobs(["upgrade"]), title: "Re-download videos saved in lower quality, slowly in the background" }, `Upgrade ${c.lowq} videos to best quality`) : null,
       h("button", { class: "danger", onclick: () => api("/api/jobs", { method: "POST", body: { action: "cancel" } }).then(() => toast("Stopping after the current post")) }, "Stop")),
     h("div", { class: "jobs", id: "jobList", style: "margin-top:14px" }));
+  const verLine = h("div", { class: "stat-line", style: "margin-top:14px" }, "Stash " + (UPD?.current || ""));
+  const verBtn = h("button", { onclick: async () => {
+    verBtn.disabled = true; const u = await checkUpdate(true); verBtn.disabled = false;
+    if (!u) return toast("Couldn't check for updates", { error: true });
+    if (u.error) return toast(esc(u.error), { error: true });
+    if (u.available && u.can_install) updateDialog();
+    else if (u.available) toast(`Stash ${esc(u.latest)} is out. Download it from the Releases page.`, { action: { label: "Open", fn: () => openExternal(u.url) } });
+    else toast(`You're on the latest version (${esc(u.current)})`);
+    verLine.textContent = "Stash " + u.current;
+  } }, "Check for updates");
+  statusSec.append(verLine, h("div", { class: "row" }, verBtn));
+  if (!UPD) checkUpdate().then((u) => { if (u) verLine.textContent = "Stash " + u.current; });
   if (!s._gallery_dl) statusSec.append(h("p", { style: "color:var(--danger)" }, "The sync engine is missing from this copy of Stash. Download the latest version and replace the app."));
 
   // --- import
@@ -1155,6 +1167,44 @@ window.addEventListener("drop", (e) => {
 $("#themeBtn").onclick = () => applyTheme({ auto: "light", light: "dark", dark: "auto" }[getTheme()]);
 applyTheme(getTheme());
 
+// ---------------- updates ----------------
+let UPD = null;
+async function checkUpdate(force) {
+  try { UPD = await api("/api/update" + (force ? "?force=1" : "")); } catch { return null; }
+  const btn = $("#updateBtn");
+  btn.hidden = !(UPD.available && UPD.can_install);
+  btn.textContent = `Update to ${UPD.latest}`;
+  return UPD;
+}
+function updateDialog() {
+  if (!UPD) return;
+  const mb = UPD.asset?.size ? ` (about ${Math.round(UPD.asset.size / 1048576)} MB)` : "";
+  const changes = (UPD.notes.split(/Changes:/)[1] || "").trim().split("\n")[0].slice(0, 300);
+  modal({
+    title: `Update to Stash ${UPD.latest}`,
+    text: `You have ${UPD.current}. Stash downloads the new version${mb}, swaps it in and reopens. Your library, collections and moodboards stay exactly as they are.`,
+    body: h("div", {},
+      changes ? h("p", { class: "hint" }, "What's new: " + changes) : null,
+      h("p", { class: "hint" }, "If your Mac then asks about “Chrome Safe Storage”, choose Always Allow. That's how sync keeps reading your Instagram sign-in.")),
+    actions: [{ label: "Later", fn: (c) => c() }, { label: "Update now", primary: true, fn: (c) => { c(); installUpdate(); } }],
+  });
+}
+async function installUpdate() {
+  const t = toast('<span class="spinner"></span>Downloading update', { ms: 1e9 });
+  const say = (m) => { t.querySelector("span").innerHTML = m; };
+  try { await api("/api/update", { method: "POST" }); } catch (e) { t.remove(); return toast(esc(e.message), { error: true }); }
+  const poll = async () => {
+    let r; try { r = await api("/api/update"); } catch { say("Restarting Stash…"); return; }   // the app has quit to swap itself
+    const s = r.state;
+    if (s.status === "error") { t.remove(); return toast("Update failed: " + esc(s.error), { error: true }); }
+    if (s.status === "manual") { t.remove(); return modal({ title: "Almost there", text: s.message, actions: [{ label: "OK", primary: true, fn: (c) => c() }] }); }
+    say('<span class="spinner"></span>' + esc(s.status === "restarting" ? "Restarting Stash…" : s.status === "installing" ? "Installing update" : s.message || "Downloading update"));
+    setTimeout(poll, 800);
+  };
+  poll();
+}
+$("#updateBtn").onclick = updateDialog;
+
 // boot
 try {
   const so = localStorage.getItem("sf-sort"); if (so) { S.sort = so; $("#sort").value = so; }
@@ -1167,3 +1217,7 @@ readHash();
 if (S.filter.simimg) { delete S.filter.simimg; writeHash(); }
 loadSidebar().then(() => { reload(); });
 pollJobs();
+if (DESKTOP) {
+  checkUpdate().then((u) => { if (u?.available && u.can_install) toast(`Stash ${esc(u.latest)} is available`, { action: { label: "Update", fn: updateDialog } }); });
+  setInterval(() => checkUpdate(), 3 * 3600 * 1000);
+}

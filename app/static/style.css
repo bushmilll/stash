@@ -146,6 +146,8 @@ button.cell:hover { background: var(--ink); color: var(--paper); }
 .search { flex: 1; min-width: 0; padding-left: var(--pad); }
 .search input { flex: 1; min-width: 0; border: 0; padding: 0; font-size: var(--fs-m); }
 .search kbd { font: 400 var(--fs-xs) var(--mono); border: 1px solid var(--rule-soft); padding: 0 5px; color: var(--ink-3); }
+.update-pill { background: var(--signal); color: #000; font-weight: 600; }
+.update-pill:hover { background: var(--ink); color: var(--paper); }
 .sync-pill .dot { width: 8px; height: 8px; background: var(--ink-3); }
 .sync-pill.live .dot { background: var(--signal); animation: blink 1s steps(2) infinite; }
 .sync-pill.error .dot { background: var(--danger); }
@@ -377,10 +379,19 @@ code { font-family: var(--mono); font-size: var(--fs-xs); background: var(--cell
 .paper-wrap { margin: 0 auto; }
 .bitem { position: absolute; cursor: grab; touch-action: none; user-select: none; }
 .bitem .img { position: absolute; inset: 0; overflow: hidden; }
+.board-opts { height: 38px; }
+.board-opts [hidden] { display: none !important; }
+.paper.structured .bitem.media { transition: left .22s ease, top .22s ease, width .22s ease, height .22s ease; }
+.bitem.media.lifting { transition: none !important; z-index: 3000 !important; opacity: .85; box-shadow: 0 14px 40px rgba(0,0,0,.35); cursor: grabbing; }
+.bitem.media.drop { outline: 2px dashed var(--signal); outline-offset: 3px; }
+.bitem.text.derived { cursor: default; }
+.bitem.text.title { cursor: text; }
+.bitem .t { display: block; outline: none; }
 .bitem img { width: 100%; height: 100%; display: block; object-fit: cover; pointer-events: none; -webkit-user-drag: none; }
 .bitem.fit .img img { object-fit: contain; }
 .bitem .num { position: absolute; left: 0; top: 100%; margin-top: 6px; font-family: var(--mono); font-size: 11px; white-space: nowrap; pointer-events: none; }
 .bitem.sel { outline: 2px solid var(--signal); }
+.paper.structured .bitem.media .grip { display: none !important; }
 .bitem .grip { position: absolute; right: -6px; bottom: -6px; width: 11px; height: 11px; background: var(--signal); cursor: nwse-resize; display: none; z-index: 2; }
 .bitem.sel .grip { display: block; }
 .bitem .vbadge { position: absolute; top: 6px; right: 6px; background: #000; color: #fff; font: 400 10px var(--mono); padding: 1px 5px; pointer-events: none; text-transform: uppercase; }

@@ -37,7 +37,7 @@ def run(port):
             check("serves " + path, st == 200 and len(b) > 100)
         except Exception as e:
             check("serves " + path, False, str(e))
-    for path in ("/api/sidebar", "/api/posts", "/api/facets", "/api/boards", "/api/library"):
+    for path in ("/api/sidebar", "/api/posts", "/api/facets", "/api/boards", "/api/library", "/api/update"):
         try:
             st, _ = get(path)
             check("api " + path, st == 200)

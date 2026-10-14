@@ -114,6 +114,7 @@ CREATE TABLE IF NOT EXISTS boards (
     width INTEGER DEFAULT 1600,
     gap INTEGER DEFAULT 12,
     items TEXT DEFAULT '[]',
+    settings TEXT DEFAULT '{}',
     created_at INTEGER, updated_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS analysis (
@@ -171,6 +172,9 @@ def init():
             c.execute("ALTER TABLE media ADD COLUMN poster TEXT")      # full-res still for videos
         if "hq" not in mcols:
             c.execute("ALTER TABLE media ADD COLUMN hq INTEGER DEFAULT 0")  # 1 = best quality Instagram offers
+        bcols = {r[1] for r in c.execute("PRAGMA table_info(boards)")}
+        if "settings" not in bcols:
+            c.execute("ALTER TABLE boards ADD COLUMN settings TEXT DEFAULT '{}'")   # layout, title, captions, tile shape…
         c.execute("CREATE INDEX IF NOT EXISTS posts_deleted ON posts(deleted_at)")
         acols = {r[1] for r in c.execute("PRAGMA table_info(analysis)")}
         for col, typ in (("content", "TEXT"), ("content_conf", "REAL"), ("clip", "BLOB"),
