@@ -76,7 +76,12 @@ jobs:
           mkdir dmg
           cp -R dist/Stash.app dmg/
           ln -s /Applications dmg/Applications
-          hdiutil create -volname Stash -srcfolder dmg -ov -format UDZO "Stash-${{ matrix.arch }}.dmg"
+          # hdiutil is occasionally "resource busy" on CI machines: retry a few times
+          for attempt in 1 2 3 4 5; do
+            hdiutil create -volname Stash -srcfolder dmg -ov -format UDZO "Stash-${{ matrix.arch }}.dmg" && break
+            echo "hdiutil failed (attempt $attempt), retrying"; sleep $((attempt * 10))
+          done
+          test -f "Stash-${{ matrix.arch }}.dmg"
 
       - uses: actions/upload-artifact@v4
         with:
