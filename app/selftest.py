@@ -15,10 +15,16 @@ def run(port):
         with urllib.request.urlopen(base + path, timeout=20) as r:
             return r.status, r.read()
 
+    import os as _os
+    on_ci = bool(_os.environ.get("GITHUB_ACTIONS"))
+
     def check(name, ok, detail=""):
         print(("PASS " if ok else "FAIL ") + name + (f"  ({detail})" if detail else ""), flush=True)
         if not ok:
             fails.append(name)
+            if on_ci:   # shows up as a readable note on the build, even without opening the log
+                msg = f"{name}: {detail}".replace("%", "%25").replace("\r", "").replace("\n", " | ")[:900]
+                print(f"::error title=Self-test failed::{msg}", flush=True)
 
     st, body = get("/api/settings")
     s = json.loads(body)
@@ -104,8 +110,11 @@ def run(port):
             check("AI doesn't tag a film frame as text", l2 != "text", f"{l2} {s2}")
             l3, _ = ai.classify(v2, "my new camera gear review, lens unboxing")
             print(f"  (film frame with a gear caption -> {l3})", flush=True)
+            if on_ci:
+                print(f"::notice title=AI tags::text card -> {l1}, film frame -> {l2}, film frame + gear caption -> {l3}", flush=True)
         except Exception as e:
-            check("AI tags", False, repr(e))
+            import traceback
+            check("AI tags", False, repr(e) + " " + traceback.format_exc()[-600:])
 
     print(f"\n{len(fails)} failed" if fails else "\nall checks passed", flush=True)
     return not fails

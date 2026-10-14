@@ -64,8 +64,15 @@ def main():
     port, _ = _start_server()
     if os.environ.get("STASH_SELFTEST"):
         # used by the build: check the packaged app works, then quit (no window)
-        from app.selftest import run
-        ok = run(port)
+        try:
+            from app.selftest import run
+            ok = run(port)
+        except Exception:
+            import traceback
+            tb = traceback.format_exc()
+            print(tb, flush=True)
+            print("::error title=Self-test crashed::" + tb[-900:].replace("\n", " | "), flush=True)
+            ok = False
         sys.stdout.flush()
         os._exit(0 if ok else 1)
     url = f"http://127.0.0.1:{port}/?app=1"
