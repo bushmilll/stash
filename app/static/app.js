@@ -1137,7 +1137,7 @@ function renderDrawer(focus) {
 
   // --- import
   const fileInput = h("input", { type: "file", accept: ".zip,.json", multiple: true, hidden: true });
-  const drop = h("div", { class: "drop", tabindex: "0", onclick: () => fileInput.click() }, "Drop the export .zip here, or click to choose it");
+  const drop = h("div", { class: "drop", tabindex: "0", onclick: () => fileInput.click() }, "Drop the export .zip here (all parts if there are several), or click to choose");
   const doImport = async (files) => {
     files = [...files];
     const form = (extra) => { const fd = new FormData(); for (const f of files) fd.append("file", f); for (const [k, v] of Object.entries(extra)) fd.append(k, v); return fd; };
@@ -1145,13 +1145,25 @@ function renderDrawer(focus) {
     let pv;
     try { pv = await api("/api/import", { method: "POST", body: form({ preview: "1" }) }); }
     catch (e) { drop.textContent = e.message; return; }
-    drop.textContent = "Drop the export .zip here, or click to choose it";
+    drop.textContent = "Drop the export .zip here (all parts if there are several), or click to choose";
     // pick which collections come in: nothing is ticked until you choose
     const boxes = pv.collections.map((c) => { const i = h("input", { type: "checkbox", value: c.name }); return [i, h("label", { class: "check" }, i, `${c.name}  `, h("span", { class: "hint", style: "display:inline" }, pad(c.count)))]; });
     const unc = h("input", { type: "checkbox" });
     const go = h("button", { class: "primary", disabled: true }, "Import");
     const sync_ = () => { go.disabled = !boxes.some(([i]) => i.checked) && !unc.checked; };
     boxes.forEach(([i]) => { i.onchange = sync_; }); unc.onchange = sync_;
+    if (!pv.collections.length) {
+      return modal({
+        title: "No collections found in this export",
+        text: pv.collections_file
+          ? `Stash found your ${pv.posts_found.toLocaleString()} saves, but couldn't read the collection names from saved_collections.json. Nothing was imported.`
+          : `Stash found your ${pv.posts_found.toLocaleString()} saves, but not the file that lists your collections (saved_collections.json). Nothing was imported.`,
+        body: h("p", { class: "hint" }, pv.collections_file
+          ? "Instagram may have changed its export format again. Send that one file to Claude to get it fixed. It only holds your collection names and post links."
+          : "Big exports often arrive as several .zip files (part 1, part 2…). Drop all of them in at once, and Stash will find the collections file in whichever part has it."),
+        actions: [{ label: "OK", primary: true, fn: (c) => c() }],
+      });
+    }
     const close = modal({
       title: "Which collections should come in?",
       text: `This export has ${pv.posts_found.toLocaleString()} saves. Only the collections you tick are added. Nothing else in the export is touched.`,

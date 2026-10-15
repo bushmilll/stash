@@ -80,19 +80,60 @@ def _post_from_entry(e):
     return None
 
 
+def _label_values(e):
+    """Newer exports: [{"label": "Name", "value": ...}, {"label": "URL", "href": ...}] -> {label: item}"""
+    out = {}
+    lv = e.get("label_values")
+    if isinstance(lv, list):
+        for x in lv:
+            if isinstance(x, dict) and isinstance(x.get("label"), str):
+                out[x["label"].strip().lower()] = x
+    return out
+
+
+NAME_KEYS = ("name", "collection", "collection name", "collection_name", "title")
+
+
 def _collection_name(e):
     smd = e.get("string_map_data") or {}
-    name = smd.get("Name") or smd.get("name")
-    if isinstance(name, dict) and isinstance(name.get("value"), str):
-        return _fix_mojibake(name["value"])
-    if isinstance(e.get("title"), str) and e["title"]:
-        return _fix_mojibake(e["title"])
+    for k, v in smd.items():
+        if k.strip().lower() in NAME_KEYS and isinstance(v, dict) and isinstance(v.get("value"), str) and not v.get("href"):
+            return _fix_mojibake(v["value"])
+    lv = _label_values(e)
+    for k in NAME_KEYS:
+        v = lv.get(k)
+        if v and isinstance(v.get("value"), str) and v["value"].strip() and not v.get("href"):
+            return _fix_mojibake(v["value"])
+    for k in ("name", "collection_name", "title"):
+        if isinstance(e.get(k), str) and e[k].strip():
+            return _fix_mojibake(e[k])
     return None
 
 
+def _codes(obj):
+    out = []
+    for s in _strings(obj):
+        for m in POST_RE.finditer(s):
+            if m.group(1) not in out:
+                out.append(m.group(1))
+    return out
+
+
 def parse_files(files):
-    """files: {filename: bytes}. Returns (posts {code: (user, saved_at)}, memberships [(code, collection)])."""
+    """files: {filename: bytes}. Returns (posts {code: (user, saved_at)}, memberships [(code, collection)]).
+
+    Collection files come in a few layouts, all handled:
+      * flat: a "collection" row (a name, no link) followed by the rows of its posts
+      * label_values: the same, written as [{"label": "Name", "value": ...}]
+      * nested: one entry per collection with its posts inside it
+    """
     posts, memberships = {}, []
+
+    def add_post(code, user, ts):
+        old = posts.get(code)
+        if not old or (ts and (not old[1] or ts < old[1])) or (user and not old[0]):
+            posts[code] = (user or (old[0] if old else ""), ts or (old[1] if old else None))
+
     for fname, raw in files.items():
         low = fname.lower()
         if not low.endswith(".json") or "saved" not in low:
@@ -106,14 +147,27 @@ def parse_files(files):
         for e in _entries(data):
             if not isinstance(e, dict):
                 continue
+            codes = _codes(e)
+            if is_collections and len(codes) > 1:
+                # nested: this entry is a whole collection
+                name = _collection_name(e)
+                for sub in _walk(e):
+                    sub_codes = [c for c in _codes(sub) if c in codes]
+                    if len(sub_codes) == 1 and sub is not e:
+                        p = _post_from_entry(sub)
+                        if p:
+                            add_post(*p)
+                for code in codes:
+                    if code not in posts:
+                        add_post(code, "", None)
+                    if name:
+                        memberships.append((code, name))
+                continue
             p = _post_from_entry(e)
             if p:
-                code, user, ts = p
-                old = posts.get(code)
-                if not old or (ts and (not old[1] or ts < old[1])) or (user and not old[0]):
-                    posts[code] = (user or (old[0] if old else ""), ts or (old[1] if old else None))
+                add_post(*p)
                 if is_collections and current:
-                    memberships.append((code, current))
+                    memberships.append((p[0], current))
             elif is_collections:
                 name = _collection_name(e)
                 if name:
@@ -141,6 +195,7 @@ def preview(files):
         counts[name] = counts.get(name, 0) + 1
     in_any = {code for code, _ in memberships}
     return {"posts_found": len(posts), "uncollected": len(set(posts) - in_any),
+            "collections_file": any("collection" in n.lower() for n in files),
             "collections": [{"name": n, "count": c} for n, c in sorted(counts.items(), key=lambda kv: kv[0].lower())]}
 
 
