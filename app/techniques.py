@@ -20,7 +20,7 @@ import numpy as np
 
 from . import db
 
-TECH_VERSION = 1
+TECH_VERSION = 2
 
 # key: (label, group)
 TAGS = {
@@ -112,8 +112,8 @@ BINARY = {
     "vintage": (["old vintage film footage with grain and scratches", "a faded retro photograph from the 1970s"], ["a modern clean digital image"]),
 }
 # frame-level cutoffs (CLIP scores are sharp at this scale; tuned conservative so tags are trustworthy)
-BINARY_P = 0.86
-EXCLUSIVE_P = 0.5
+BINARY_P = 0.95
+EXCLUSIVE_P = 0.6
 SHARE = 0.3         # a video gets a tag when this share of its frames show it
 
 _prompts = {}
