@@ -922,7 +922,7 @@ async def board_one(request):
             "vin", "vout", "still")   # vin/vout: the section a video tile loops; still: the frame static exports show
     items = [{k: it[k] for k in keep if k in it} for it in body.get("items", [])][:500]
     allowed = {"layout": str, "show_title": bool, "title_pos": str, "captions": (str, bool), "numbered": bool, "tile_ar": str,
-               "fill": bool, "tilt": bool, "video_labels": bool, "motion": bool}
+               "fill": bool, "tilt": bool, "video_labels": bool, "motion": bool, "size": str, "pages": str, "rows": int, "cols": int}
     settings = {k: v for k, v in (body.get("settings") or {}).items() if k in allowed and isinstance(v, allowed[k])}
     with db.tx() as w:
         w.execute("UPDATE boards SET name=?, bg=?, width=?, gap=?, items=?, settings=?, updated_at=? WHERE id=?",
@@ -957,15 +957,20 @@ async def board_add(request):
 
 
 async def board_pdf(request):
-    """Wrap the PNG the browser rendered into a PDF page (same size, no recompression of the image)."""
+    """Wrap the PNG(s) the browser rendered into a PDF, one page per slide (no recompression of the images)."""
     from io import BytesIO
     from PIL import Image
-    raw = await request.body()
+    if request.headers.get("content-type", "").startswith("multipart/"):
+        form = await request.form()
+        keys = sorted((k for k in form.keys() if k.startswith("page")), key=lambda k: int(k[4:]))
+        raws = [await form[k].read() for k in keys]
+    else:
+        raws = [await request.body()]
     def work():
-        im = Image.open(BytesIO(raw)).convert("RGB")
+        pages = [Image.open(BytesIO(r)).convert("RGB") for r in raws]
         name = _safe_name(request.query_params.get("name", "moodboard"))
         out = db.EXPORT_DIR / f"{name}_{int(time.time())}.pdf"
-        im.save(out, "PDF", resolution=144.0, quality=95)
+        pages[0].save(out, "PDF", resolution=144.0, quality=95, save_all=True, append_images=pages[1:])
         return out
     out = await run_in_threadpool(work)
     return JSONResponse({"url": f"/exports/{out.name}", "name": out.name, "size": out.stat().st_size})

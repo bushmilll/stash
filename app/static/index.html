@@ -65,6 +65,10 @@
     <button class="cell primary" id="boardPng">Export PNG</button>
   </div>
   <div class="board-bar board-opts">
+    <div class="cell menu-cell" id="sizeCtl"></div>
+    <div class="cell toggle" role="group" aria-label="Pages" id="pagesCtl" hidden><span class="lbl">Pages</span><button data-pages="flow" title="As many slides as it takes">Flow</button><button data-pages="fit" title="Everything on one slide">Fit on one</button></div>
+    <label class="cell" data-only="rows"><span class="lbl">Rows</span><input type="range" id="rowsRange" min="1" max="12" value="3" aria-label="Number of rows"><span class="tc" id="rowsVal"></span></label>
+    <label class="cell" data-only="masonry"><span class="lbl">Columns</span><input type="range" id="colsRange" min="1" max="8" value="4" aria-label="Number of columns"><span class="tc" id="colsVal"></span></label>
     <div class="cell toggle" role="group" aria-label="Title"><span class="lbl">Title</span><button data-title="top">Top</button><button data-title="bottom">Bottom</button><button data-title="off">Off</button></div>
     <div class="cell toggle" role="group" aria-label="Numbers" data-only="sheet"><span class="lbl">Numbered</span><button data-num="1">On</button><button data-num="0">Off</button></div>
     <div class="cell toggle" role="group" aria-label="Captions" data-only="sheet"><span class="lbl">Captions</span><button data-cap="full" title="Handle and the start of the caption">Full</button><button data-cap="handles" title="Just the handles">Handles</button><button data-cap="off">Off</button></div>

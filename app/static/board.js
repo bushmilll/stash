@@ -8,7 +8,7 @@ const Board = (() => {
   const TITLE_SIZE = 64, CAP_SIZE = 11;
   const SWATCHES = [["#eceae5", "Paper"], ["#ffffff", "White"], ["#8c8a84", "Concrete"], ["#1a1a1a", "Graphite"], ["#000000", "Black"]];
   const DEFAULTS = { layout: "sheet", show_title: true, title_pos: "top", captions: "full", numbered: true, tile_ar: "orig",
-    fill: false, tilt: false, video_labels: false, motion: true };
+    fill: false, tilt: false, video_labels: false, motion: true, size: "free", pages: "flow", rows: 0, cols: 0 };
   const TILE = { orig: 1.25, "1:1": 1, "3:2": 2 / 3, "16:9": 9 / 16, "9:16": 16 / 9 };   // cell height / width
   const HINTS = {
     structured: "Drag a post onto another to swap / click a video to loop it / Delete removes / ⌘Z undo",
@@ -94,8 +94,8 @@ const Board = (() => {
   }
 
   // ---------- layouts: each places the posts from y0 down and returns where they end ----------
-  function layoutSheet(ms, y0, v) {
-    const n = ms.length, r = TILE[st.tile_ar] || 1.25;
+  function layoutSheet(ms, y0, v, o = {}) {
+    const n = o.nCols || ms.length, r = TILE[st.tile_ar] || 1.25;
     let cols = n <= 3 ? n : n <= 8 ? 4 : n <= 18 ? 6 : 8;
     if (r < 1) cols = n <= 3 ? n : n <= 9 ? 3 : n <= 16 ? 4 : 5;          // wide tiles: fewer per row
     else if (r > 1.5) cols = n <= 4 ? n : n <= 12 ? 6 : 8;                  // tall tiles: more per row
@@ -104,41 +104,69 @@ const Board = (() => {
     const cw = Math.min(maxW, (W - 2 * MARGIN - (cols - 1) * g) / cols), ch = cw * r;
     ms.forEach((it, i) => {
       const c = i % cols, row = Math.floor(i / cols);
-      v.media.set(it, { x: MARGIN + c * (cw + g), y: y0 + row * (ch + ns + g), w: cw, h: ch, cell: true, fit: !st.fill, num: st.numbered ? i + 1 : null });
+      v.media.set(it, { x: MARGIN + c * (cw + g), y: y0 + row * (ch + ns + g), w: cw, h: ch, cell: true, fit: !st.fill, num: st.numbered ? (o.numBase || 0) + i + 1 : null });
     });
-    return y0 + Math.ceil(n / cols) * (ch + ns + g) - g;
+    return y0 + Math.ceil(ms.length / cols) * (ch + ns + g) - g;
   }
+  const autoCols = (n) => (n === 1 ? 1 : Math.max(2, Math.min(6, Math.round(Math.sqrt(n * 0.9)))));
   function layoutMasonry(ms, y0, v) {
     const n = ms.length;
-    const cols = n === 1 ? 1 : Math.max(2, Math.min(6, Math.round(Math.sqrt(n * 0.9))));
+    const cols = Math.max(1, Math.min(n, st.cols || autoCols(n)));
     const g = B.gap, cw = Math.min(900, (W - 2 * MARGIN - (cols - 1) * g) / cols);
-    const ys = new Array(cols).fill(y0);
+    const colsItems = Array.from({ length: cols }, () => []), hs = new Array(cols).fill(0);
     for (const it of ms) {
-      let c = 0; for (let j = 1; j < cols; j++) if (ys[j] < ys[c] - 0.5) c = j;
-      const hh = cw * ratio(it);
-      v.media.set(it, { x: MARGIN + c * (cw + g), y: ys[c], w: cw, h: hh });
-      ys[c] += hh + g;
+      let c = 0; for (let j = 1; j < cols; j++) if (hs[j] < hs[c] - 0.5) c = j;
+      colsItems[c].push(it); hs[c] += cw * ratio(it) + g;
     }
-    return Math.max(...ys) - g;
+    // even bottoms: one shared height every column can reach with the least trimming (images crop from the centre)
+    const used = colsItems.map((list) => list.length ? { list, nat: list.reduce((a, it) => a + cw * ratio(it), 0), gaps: (list.length - 1) * g } : null).filter(Boolean);
+    const mean = used.reduce((a, c) => a + c.nat + c.gaps, 0) / (used.length || 1);
+    let T = mean;
+    for (const [lo, hi] of [[0.85, 1.15], [0.75, 1.25], [0.65, 1.4], [0.5, 1.7], [0.35, 2.5]]) {
+      const a = Math.max(...used.map((c) => c.nat * lo + c.gaps)), b = Math.min(...used.map((c) => c.nat * hi + c.gaps));
+      if (a <= b) { T = Math.min(b, Math.max(a, mean)); break; }
+    }
+    let end = y0;
+    colsItems.forEach((list, c) => {
+      if (!list.length) return;
+      const natural = list.reduce((a, it) => a + cw * ratio(it), 0), gaps = (list.length - 1) * g;
+      const f = (T - gaps) / natural;
+      let y = y0;
+      for (const it of list) { const hh = cw * ratio(it) * f; v.media.set(it, { x: MARGIN + c * (cw + g), y, w: cw, h: hh }); y += hh + g; }
+      end = Math.max(end, y - g);
+    });
+    return end;
+  }
+  const autoRows = (n) => Math.max(1, Math.min(n, Math.round(Math.sqrt(n / 2.2)) || 1));
+  // split posts (in order) into R rows whose widths are as even as possible, then stretch every row edge to edge
+  function partition(weights, R) {
+    const n = weights.length, pre = [0];
+    for (const w of weights) pre.push(pre[pre.length - 1] + w);
+    const cost = Array.from({ length: R + 1 }, () => new Array(n + 1).fill(Infinity)), cut = Array.from({ length: R + 1 }, () => new Array(n + 1).fill(0));
+    cost[0][0] = 0;
+    for (let r = 1; r <= R; r++) for (let i = r; i <= n; i++) for (let j = r - 1; j < i; j++) {
+      const c = Math.max(cost[r - 1][j], pre[i] - pre[j]);
+      if (c < cost[r][i]) { cost[r][i] = c; cut[r][i] = j; }
+    }
+    const rows = []; let i = n;
+    for (let r = R; r >= 1; r--) { const j = cut[r][i]; rows.unshift([j, i]); i = j; }
+    return rows;
   }
   function layoutRows(ms, y0, v) {
-    const g = B.gap, avail = W - 2 * MARGIN, target = Math.max(220, Math.min(420, avail / Math.max(2, Math.sqrt(ms.length) * 0.9)));
-    let y = y0, row = [], sum = 0;
-    const flushRow = (last) => {
-      if (!row.length) return;
-      let rh = (avail - (row.length - 1) * g) / sum;
-      if (last && rh > target * 1.35) rh = target;
+    const n = ms.length, g = B.gap, avail = W - 2 * MARGIN;
+    const R = Math.max(1, Math.min(n, st.rows || autoRows(n)));
+    let y = y0;
+    for (const [a, b] of partition(ms.map((it) => 1 / ratio(it)), R)) {
+      const row = ms.slice(a, b); if (!row.length) continue;
+      const rh = (avail - (row.length - 1) * g) / row.reduce((s_, it) => s_ + 1 / ratio(it), 0);
       let x = MARGIN;
       for (const it of row) { const w = rh / ratio(it); v.media.set(it, { x, y, w, h: rh }); x += w + g; }
-      y += rh + g; row = []; sum = 0;
-    };
-    for (const it of ms) {
-      row.push(it); sum += 1 / ratio(it);
-      if (sum * target + (row.length - 1) * g >= avail) flushRow(false);
+      y += rh + g;
     }
-    flushRow(true);
     return y - g;
   }
+  const cs = () => view?.cs || { s: 1, ox: 0, oy: view?.y0 || 0 };
+  const collageP = (it) => { const c = cs(); return { x: c.ox + it.cx * c.s, y: c.oy + it.cy * c.s, w: it.cw * c.s, h: it.ch * c.s, rot: st.tilt ? it.rot || 0 : 0, free: true }; };
   function layoutCollage(ms, y0, v) {
     ensureCollage();
     let end = y0;
@@ -191,7 +219,8 @@ const Board = (() => {
     render(); save();
   }
 
-  function captions(ms, y, v) {
+  function captions(ms, y, v) { return captionsFor(ms, y, v, 0, ""); }
+  function captionsFor(ms, y, v, numBase, pageKey) {
     const n = ms.length, full = st.captions === "full";
     const listCols = Math.min(6, Math.max(2, Math.ceil(n / (full ? 4 : 8))));
     const lw = (W - 2 * MARGIN - (listCols - 1) * 24) / listCols, per = Math.ceil(n / listCols);
@@ -200,25 +229,29 @@ const Board = (() => {
       const chunk = ms.slice(k * per, (k + 1) * per);
       if (!chunk.length) break;
       const text = chunk.map((it, j) => {
-        const num = st.numbered ? numLabel(k * per + j + 1) + " " : "";
+        const num = st.numbered ? numLabel(numBase + k * per + j + 1) + " " : "";
         const who = it.username ? "@" + it.username : it.shortcode || "";
         if (!full) return num + who;
         const cap = (it.caption || "").replace(/\s+/g, " ").replace(/#\w+/g, "").trim();
         return `${num}${who}${cap ? "\n" + (cap.length > 64 ? cap.slice(0, 62) + "…" : cap) : ""}`;
       }).join(full ? "\n\n" : "\n");
-      const key = "cap" + k;
+      const key = "cap" + pageKey + "_" + k;
       v.texts.push({ key, text, x: MARGIN + k * (lw + 24), y, w: lw, size: CAP_SIZE, mono: true });
       end = Math.max(end, y + (heights[key] ?? chunk.length * (full ? 4 : 1) * CAP_SIZE * 1.3));
     }
     return end;
   }
 
+  // fixed board sizes (height / width), for slides; "free" grows with what's on it
+  const SIZES = { "16:9": 9 / 16, "4:3": 3 / 4, "3:2": 2 / 3, "1:1": 1, "4:5": 5 / 4, "9:16": 16 / 9 };
+  const PAGE_GAP = 64;      // space between slides on screen (not exported)
   function compute() {
-    const v = { media: new Map(), texts: [] };
+    const v = { media: new Map(), texts: [], pages: [] };
     const ms = media();
     const titleH = heights.title ?? TITLE_SIZE * 1.12;
     const title = (y) => ({ key: "title", title: true, text: B.name || "Untitled moodboard", x: MARGIN, y, w: W - 2 * MARGIN, size: TITLE_SIZE });
     const top = st.show_title && st.title_pos !== "bottom";
+    if (SIZES[st.size]) { computePaged(v, ms, title, titleH, top); return v; }
     let y = MARGIN;
     if (top) { v.texts.push(title(y)); y += titleH + 36; }
     v.y0 = y;
@@ -227,9 +260,71 @@ const Board = (() => {
     if (st.show_title && !top) { const ty = end + (ms.length ? 56 : 0); v.texts.push(title(ty)); end = ty + titleH; }
     const noteEnd = notes().filter((it) => it.x != null).map((it) => it.y + (it._h || it.size * 1.3));
     v.H = Math.max(900, end + MARGIN, ...noteEnd.map((b) => b + MARGIN));
+    v.pages = [{ top: 0, h: v.H }];
     return v;
   }
-
+  // lay a group of posts out on its own, from y = 0: -> { media, texts, h }
+  function sandbox(chunk, numBase, key) {
+    const t = { media: new Map(), texts: [] };
+    let end = chunk.length ? LAYOUTS[st.layout](chunk, 0, t, { numBase, nCols: media().length }) : 0;
+    if (st.layout === "sheet" && st.captions !== "off" && chunk.length) {
+      const before = t.texts.length;
+      end = captionsFor(chunk, end + 40, t, numBase, key);
+      for (let i = before; i < t.texts.length; i++) t.texts[i].page = key;
+    }
+    return { ...t, h: end };
+  }
+  function computePaged(v, ms, title, titleH, top) {
+    const PH = Math.round(W * SIZES[st.size]);
+    const bottomTitle = st.show_title && !top;
+    const area = (first, last) => PH - 2 * MARGIN - (first && top ? titleH + 32 : 0) - (last && bottomTitle ? titleH + 32 : 0);
+    // which posts go on which slide
+    const chunks = [];
+    if (st.pages === "fit" || st.layout === "collage" || !ms.length) chunks.push(ms);
+    else {
+      let s0 = 0;
+      while (s0 < ms.length) {
+        const avail = area(chunks.length === 0, false) * 1.02;
+        const left = ms.length - s0;
+        let k = 1;
+        if (st.layout === "rows") {
+          // rows: fewest posts that still fit the slide's height in the chosen number of rows
+          const R = st.rows || 3;
+          k = Math.min(left, R);
+          while (k < left && sandbox(ms.slice(s0, s0 + k), s0, "p" + chunks.length).h > avail) k++;
+        } else {
+          // sheet / columns: as many posts as fit
+          while (k < left && sandbox(ms.slice(s0, s0 + k + 1), s0, "p" + chunks.length).h <= avail) k++;
+        }
+        chunks.push(ms.slice(s0, s0 + k)); s0 += k;
+      }
+    }
+    if (bottomTitle && chunks.length > 1) {   // keep room for the title on the last slide
+      const last = chunks[chunks.length - 1];
+      if (sandbox(last, ms.length - last.length, "p" + (chunks.length - 1)).h > area(false, true) * 1.02) chunks.push([]);
+    }
+    let base = 0;
+    chunks.forEach((chunk, pi) => {
+      const first = pi === 0, last = pi === chunks.length - 1;
+      const pageTop = pi * (PH + PAGE_GAP);
+      v.pages.push({ top: pageTop, h: PH });
+      let y = pageTop + MARGIN;
+      if (first && top) { v.texts.push(title(y)); y += titleH + 32; }
+      const avail = area(first, last);
+      const sb = sandbox(chunk, base, "p" + pi);
+      const sc = sb.h > avail ? avail / sb.h : 1;     // shrink to fit when needed, centred across
+      const dx = (W - 2 * MARGIN) * (1 - sc) / 2;
+      const dy = st.layout === "sheet" || sc < 1 ? 0 : (avail - sb.h) / 2;
+      const tx = (x) => MARGIN + (x - MARGIN) * sc + dx, ty = (yy) => y + dy + yy * sc;
+      for (const [it, p] of sb.media) v.media.set(it, { ...p, x: tx(p.x), y: ty(p.y), w: p.w * sc, h: p.h * sc, page: pi });
+      for (const t of sb.texts) v.texts.push({ ...t, x: tx(t.x), y: ty(t.y), w: t.w * sc, size: t.size * sc, _sc: sc });
+      if (st.layout === "collage") v.cs = { s: sc, ox: dx + MARGIN * (1 - sc), oy: y + dy };
+      if (last && bottomTitle) v.texts.push(title(pageTop + PH - MARGIN - titleH));
+      base += chunk.length;
+    });
+    v.y0 = MARGIN + (top ? titleH + 32 : 0);
+    v.H = chunks.length * PH + (chunks.length - 1) * PAGE_GAP;
+  }
   // ---------- rendering (elements are kept and moved, so swaps and reflows animate) ----------
   function mediaEl(it) {
     const el = h("div", { class: "bitem media" });
@@ -294,10 +389,17 @@ const Board = (() => {
   }
   function paint() {
     const paper = $("#paper");
-    paper.style.background = B.bg;
+    const paged = !!SIZES[st.size];
+    paper.style.background = paged ? "transparent" : B.bg;
+    paper.classList.toggle("paged", paged);
     paper.classList.toggle("structured", structured());
     const live = new Set();
     const get = (key, make) => { let el = els.get(key); if (!el) { el = make(); els.set(key, el); paper.append(el); } live.add(el); return el; };
+    if (paged) view.pages.forEach((pg, i) => {
+      const el = get("page:" + i, () => h("div", { class: "page-bg" }, h("span", { class: "page-no" })));
+      Object.assign(el.style, { top: pg.top + "px", height: pg.h + "px", background: B.bg });
+      el.firstChild.textContent = view.pages.length > 1 ? `Slide ${pad(i + 1, 2)} / ${pad(view.pages.length, 2)}` : "";
+    });
     for (const [it, p] of view.media) placeMedia(get(it, () => mediaEl(it)), it, p);
     for (const it of notes()) { if (it.x == null) continue; const el = get(it, () => textEl(it, false)); el._item = it; placeText(el, it, 1000 + (it.z || 0)); }
     for (const t of view.texts) { const el = get("k:" + t.key, () => textEl(t, true)); el._item = t; placeText(el, t, 999); }
@@ -315,7 +417,10 @@ const Board = (() => {
     for (const [k, el] of els) {
       if (!el.classList?.contains("text")) continue;
       const hh = el.offsetHeight;
-      if (typeof k === "string") { const key = k.slice(2); if (Math.abs((heights[key] ?? -99) - hh) > 1) { heights[key] = hh; changed = true; } }
+      if (typeof k === "string") {   // stored at full size, even when a slide shrank it to fit
+        const key = k.slice(2), hv = hh / (el._item?._sc || 1);
+        if (Math.abs((heights[key] ?? -99) - hv) > 1) { heights[key] = hv; changed = true; }
+      }
       else k._h = hh;
     }
     return changed;
@@ -334,7 +439,9 @@ const Board = (() => {
     paper.style.width = W + "px"; paper.style.height = H + "px"; paper.style.transform = `scale(${scale})`;
     const wrap = $("#paperWrap"); wrap.style.width = W * scale + "px"; wrap.style.height = H * scale + "px";
     const loops = media().filter(looping).length;
-    $("#boardInfo").textContent = `${pad(media().length)} images${loops ? ` / ${loops} looping` : ""} / ${W} × ${Math.round(H)} / export ${W * 2} px wide`;
+    const slides = view.pages.length, ph = view.pages[0]?.h || H;
+    $("#boardInfo").textContent = `${pad(media().length)} images${loops ? ` / ${loops} looping` : ""} / ` +
+      (SIZES[st.size] ? `${slides} slide${slides > 1 ? "s" : ""} at ${st.size} / export ${W * 2} × ${Math.round(ph * 2)} px` : `${W} × ${Math.round(H)} / export ${W * 2} px wide`);
   }
   function select(it) {
     selected = it;
@@ -450,7 +557,15 @@ const Board = (() => {
     on("[data-tilt]", st.tilt ? "1" : "0");
     on("[data-vl]", st.video_labels ? "1" : "0");
     on("[data-motion]", st.motion ? "1" : "0");
-    document.querySelectorAll("[data-only]").forEach((g) => { g.hidden = g.dataset.only !== st.layout; });
+    on("[data-pages]", st.pages);
+    document.querySelectorAll("[data-only]").forEach((g) => { g.hidden = !g.dataset.only.split(" ").includes(st.layout); });
+    $("#pagesCtl").hidden = !SIZES[st.size] || st.layout === "collage";
+    if (sizePick) sizePick.value = st.size;
+    const n = media().length || 1;
+    const rr = $("#rowsRange"), cr = $("#colsRange");
+    rr.max = Math.max(1, Math.min(12, n)); rr.value = st.rows || (SIZES[st.size] && st.pages !== "fit" ? 3 : autoRows(n));
+    cr.max = Math.max(1, Math.min(8, n)); cr.value = st.cols || autoCols(n);
+    $("#rowsVal").textContent = rr.value; $("#colsVal").textContent = cr.value;
     const layerable = st.layout === "collage" && selected && !isText(selected);
     document.querySelectorAll("[data-layer]").forEach((b) => { b.disabled = !layerable; });
     $("#boardHint").textContent = HINTS[structured() ? "structured" : "collage"];
@@ -502,9 +617,10 @@ const Board = (() => {
         else { const nw = Math.max(60, drag.w + dx); it.size = Math.max(8, Math.round(drag.size * nw / drag.w)); it.w = nw; }
         placeText(drag.el, it, 1000 + it.z);
       } else if (drag.free) {   // collage: moving a piece doesn't change its layer; [ and ] do
-        if (drag.mode === "move") { it.cx = Math.round(drag.cx + dx); it.cy = Math.round(Math.max(-view.y0, drag.cy + dy)); }
-        else { const nw = Math.max(60, drag.cw + dx); it.cw = Math.round(nw); it.ch = Math.round(drag.ch * nw / drag.cw); }
-        placeMedia(drag.el, it, { x: it.cx, y: view.y0 + it.cy, w: it.cw, h: it.ch, rot: st.tilt ? it.rot || 0 : 0, free: true });
+        const k = cs().s;
+        if (drag.mode === "move") { it.cx = Math.round(drag.cx + dx / k); it.cy = Math.round(Math.max(-view.y0, drag.cy + dy / k)); }
+        else { const nw = Math.max(60, drag.cw + dx / k); it.cw = Math.round(nw); it.ch = Math.round(drag.ch * nw / drag.cw); }
+        placeMedia(drag.el, it, collageP(it));
       } else {   // structured: lift the post and show where it would land
         drag.el.classList.add("lifting");
         drag.el.style.left = drag.p.x + dx + "px"; drag.el.style.top = drag.p.y + dy + "px";
@@ -589,9 +705,11 @@ const Board = (() => {
   }
   const MONO = `"Plex Mono", "IBM Plex Mono", Menlo, monospace`, SANS = `"Inter Tight", "Helvetica Neue", Arial, sans-serif`;
   // everything on the board, bottom layer first
-  function drawList() {
-    const posts = [...view.media].sort((a, b) => (a[1].free ? a[0].z || 0 : 0) - (b[1].free ? b[0].z || 0 : 0));
-    const texts = [...view.texts, ...notes().filter((it) => it.x != null).sort((a, b) => (a.z || 0) - (b.z || 0))];
+  function drawList(pg) {
+    const on = (y, hh) => !pg || (y < pg.top + pg.h && y + hh > pg.top);   // only what's on this slide
+    const posts = [...view.media].filter(([, p]) => on(p.y, p.h)).sort((a, b) => (a[1].free ? a[0].z || 0 : 0) - (b[1].free ? b[0].z || 0 : 0));
+    const texts = [...view.texts, ...notes().filter((it) => it.x != null).sort((a, b) => (a.z || 0) - (b.z || 0))]
+      .filter((t) => on(t.y, t._h || t.size * 1.3));
     return [...posts.map(([it, p]) => ({ it, p })), ...texts.map((it) => ({ it, text: true }))];
   }
   function postSrc(it) {
@@ -626,15 +744,15 @@ const Board = (() => {
   async function loadImages(list, skip) {
     return Promise.all(list.map(({ it, text }) => (text || skip?.(it) ? null : loadImg(postSrc(it)))));
   }
-  async function renderCanvas() {
-    render();
-    const H = view.H;
+  async function renderCanvas(pg) {
+    const H = pg.h;
     const f = Math.min(2, 15000 / H, Math.sqrt(1e8 / (W * H)));
     const cv = document.createElement("canvas"); cv.width = Math.round(W * f); cv.height = Math.round(H * f);
     const ctx = cv.getContext("2d");
     ctx.fillStyle = B.bg; ctx.fillRect(0, 0, cv.width, cv.height);
-    const list = drawList(), imgs = await loadImages(list);
+    const list = drawList(pg), imgs = await loadImages(list);
     await (document.fonts?.ready || Promise.resolve());
+    ctx.translate(0, -pg.top * f);
     list.forEach((d, i) => (d.text ? drawText(ctx, d.it, f) : drawPost(ctx, imgs[i], d.p, f)));
     return cv;
   }
@@ -643,16 +761,27 @@ const Board = (() => {
     await flush();
     const label = btn.textContent; btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Rendering';
     try {
-      const cv = await renderCanvas();
-      const blob = await new Promise((r) => cv.toBlob(r, "image/png"));
+      render();
+      const pages = view.pages, many = pages.length > 1;
       const name = (B.name || "moodboard").replace(/[^\w .-]+/g, "_").slice(0, 60);
+      const blobs = [];
+      for (let i = 0; i < pages.length; i++) {
+        btn.innerHTML = `<span class="spinner"></span>Rendering${many ? ` ${i + 1}/${pages.length}` : ""}`;
+        const cv = await renderCanvas(pages[i]);
+        blobs.push(await new Promise((r) => cv.toBlob(r, "image/png")));
+      }
+      const fileName = (i) => name + (many ? `_slide${pad(i + 1, 2)}` : "") + ".png";
       if (kind === "png" && DESKTOP) {
-        savedToast(await api(`/api/desktop/save-blob?name=${encodeURIComponent(name + ".png")}`, { method: "POST", body: blob, headers: { "Content-Type": "image/png" } }));
+        let last;
+        for (let i = 0; i < blobs.length; i++) last = await api(`/api/desktop/save-blob?name=${encodeURIComponent(fileName(i))}`, { method: "POST", body: blobs[i], headers: { "Content-Type": "image/png" } });
+        savedToast(many ? { ...last, name: `${blobs.length} slides (${name}_slide01…)` } : last);
       } else if (kind === "png") {
-        const a = h("a", { href: URL.createObjectURL(blob), download: name + ".png" }); document.body.append(a); a.click(); a.remove();
-        toast(`Exported <b>${esc(name)}.png</b> / ${cv.width} × ${cv.height}`);
-      } else {
-        const r = await api(`/api/boards/pdf?name=${encodeURIComponent(name)}`, { method: "POST", body: blob, headers: { "Content-Type": "image/png" } });
+        blobs.forEach((b, i) => { const a = h("a", { href: URL.createObjectURL(b), download: fileName(i) }); document.body.append(a); a.click(); a.remove(); });
+        toast(`Exported <b>${blobs.length > 1 ? blobs.length + " slides" : esc(fileName(0))}</b>`);
+      } else {   // one PDF, a page per slide
+        const fd = new FormData();
+        blobs.forEach((b, i) => fd.append("page" + i, b, `page${i}.png`));
+        const r = await api(`/api/boards/pdf?name=${encodeURIComponent(name)}`, { method: "POST", body: fd });
         downloadUrl(r.url); if (!DESKTOP) toast(`Exported <b>${esc(r.name)}</b>`);
       }
     } catch (e) { toast(esc(e.message), { error: true }); }
@@ -683,55 +812,71 @@ const Board = (() => {
     btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Preparing';
     try {
       render();
-      const H = view.H;
-      const f = Math.min(1920 / W, 4096 / H);
-      const cw = Math.round(W * f / 2) * 2, chh = Math.round(H * f / 2) * 2;
-      const list = drawList(), imgs = await loadImages(list, (it) => looping(it));
-      await (document.fonts?.ready || Promise.resolve());
-      const layers = [], spec = [];
-      let cv = null, ctx = null, dirty = false;
-      const newLayer = (opaque) => {
-        cv = document.createElement("canvas"); cv.width = cw; cv.height = chh; ctx = cv.getContext("2d");
-        if (opaque) { ctx.fillStyle = B.bg; ctx.fillRect(0, 0, cw, chh); }
-        dirty = opaque;
-      };
-      const pushLayer = async () => {
-        if (!dirty) return;
-        layers.push(await new Promise((r) => cv.toBlob(r, "image/png")));
-        spec.push({ type: "png", file: layers.length - 1 });
-      };
-      newLayer(true);
-      for (let i = 0; i < list.length; i++) {
-        const d = list[i];
-        if (d.text) { drawText(ctx, d.it, f); dirty = true; continue; }
-        if (looping(d.it)) {
-          drawPost(ctx, null, d.p, f, true);   // its cell color / number go in the still layer
-          await pushLayer();
-          const p = d.p;
-          spec.push({ type: "video", media_id: d.it.media_id, x: p.x * f, y: p.y * f, w: p.w * f, h: p.h * f, rot: p.rot || 0,
-            fit: !!(p.cell && p.fit), bg: cellColor(), vin: d.it.vin, vout: d.it.vout });
-          newLayer(false);
-        } else { drawPost(ctx, imgs[i], d.p, f); dirty = true; }
-      }
-      await pushLayer();
-      const fd = new FormData();
-      fd.append("spec", JSON.stringify({ width: cw, height: chh, duration: secs, name: B.name || "moodboard", layers: spec }));
-      layers.forEach((b, i) => fd.append("layer" + i, b, `layer${i}.png`));
-      const { job } = await api("/api/boards/video", { method: "POST", body: fd });
-      for (;;) {
-        await new Promise((r) => setTimeout(r, 1000));
-        const s = await api(`/api/boards/video/${job}`);
-        if (s.status === "error") throw new Error(s.error || "The video export failed");
-        if (s.status === "done") { downloadUrl(s.url); if (!DESKTOP) toast(`Exported <b>${esc(s.name)}</b>`); break; }
-        btn.innerHTML = `<span class="spinner"></span>${esc(s.message || "Rendering")}`;
+      // one MP4 per slide that has something moving on it
+      const pages = view.pages.filter((pg) => drawList(pg).some((d) => !d.text && looping(d.it)));
+      for (let pi = 0; pi < pages.length; pi++) {
+        const pg = pages[pi], tag = pages.length > 1 ? ` ${pi + 1}/${pages.length}` : "";
+        const H = pg.h;
+        const f = Math.min(1920 / W, 4096 / H);
+        const cw = Math.round(W * f / 2) * 2, chh = Math.round(H * f / 2) * 2;
+        const list = drawList(pg), imgs = await loadImages(list, (it) => looping(it));
+        await (document.fonts?.ready || Promise.resolve());
+        const layers = [], spec = [];
+        let cv = null, ctx = null, dirty = false;
+        const newLayer = (opaque) => {
+          cv = document.createElement("canvas"); cv.width = cw; cv.height = chh; ctx = cv.getContext("2d");
+          if (opaque) { ctx.fillStyle = B.bg; ctx.fillRect(0, 0, cw, chh); }
+          ctx.translate(0, -pg.top * f);
+          dirty = opaque;
+        };
+        const pushLayer = async () => {
+          if (!dirty) return;
+          layers.push(await new Promise((r) => cv.toBlob(r, "image/png")));
+          spec.push({ type: "png", file: layers.length - 1 });
+        };
+        newLayer(true);
+        for (let i = 0; i < list.length; i++) {
+          const d = list[i];
+          if (d.text) { drawText(ctx, d.it, f); dirty = true; continue; }
+          if (looping(d.it)) {
+            drawPost(ctx, null, d.p, f, true);   // its cell color / number go in the still layer
+            await pushLayer();
+            const p = d.p;
+            spec.push({ type: "video", media_id: d.it.media_id, x: p.x * f, y: (p.y - pg.top) * f, w: p.w * f, h: p.h * f, rot: p.rot || 0,
+              fit: !!(p.cell && p.fit), bg: cellColor(), vin: d.it.vin, vout: d.it.vout });
+            newLayer(false);
+          } else { drawPost(ctx, imgs[i], d.p, f); dirty = true; }
+        }
+        await pushLayer();
+        const fd = new FormData();
+        const vname = (B.name || "moodboard") + (pages.length > 1 ? ` slide ${pad(view.pages.indexOf(pg) + 1, 2)}` : "");
+        fd.append("spec", JSON.stringify({ width: cw, height: chh, duration: secs, name: vname, layers: spec }));
+        layers.forEach((b, i) => fd.append("layer" + i, b, `layer${i}.png`));
+        const { job } = await api("/api/boards/video", { method: "POST", body: fd });
+        for (;;) {
+          await new Promise((r) => setTimeout(r, 1000));
+          const s = await api(`/api/boards/video/${job}`);
+          if (s.status === "error") throw new Error(s.error || "The video export failed");
+          if (s.status === "done") { downloadUrl(s.url); if (!DESKTOP) toast(`Exported <b>${esc(s.name)}</b>`); break; }
+          btn.innerHTML = `<span class="spinner"></span>${esc(s.message || "Rendering")}${tag}`;
+        }
       }
     } catch (e) { toast(esc(e.message), { error: true }); }
     btn.disabled = false; btn.textContent = label;
   }
 
   // ---------- wiring ----------
+  let sizePick = null;
   function init() {
     bindPaper();
+    // board size: free, or a fixed slide shape
+    sizePick = pick({ label: "Size", value: "free", options: [{ value: "free", label: "Free" },
+      ...Object.keys(SIZES).map((k) => ({ value: k, label: k }))], title: "Board shape. Fixed sizes export as slides" });
+    sizePick.onchange = () => set({ size: sizePick.value });
+    $("#sizeCtl").append(sizePick);
+    document.querySelectorAll("[data-pages]").forEach((b) => { b.onclick = () => set({ pages: b.dataset.pages }); });
+    $("#rowsRange").oninput = () => { $("#rowsVal").textContent = $("#rowsRange").value; set({ rows: Number($("#rowsRange").value) }); };
+    $("#colsRange").oninput = () => { $("#colsVal").textContent = $("#colsRange").value; set({ cols: Number($("#colsRange").value) }); };
     $("#boardClose").onclick = close;
     document.querySelectorAll("[data-ly]").forEach((b) => { b.onclick = () => setLayout(b.dataset.ly); });
     document.querySelectorAll("[data-title]").forEach((b) => { b.onclick = () => set(b.dataset.title === "off" ? { show_title: false } : { show_title: true, title_pos: b.dataset.title }); });
@@ -774,7 +919,7 @@ const Board = (() => {
       }
       if (clip) {   // the selected video tile's panel
         const v = clip.video;
-        const keys = { i: clipIn, o: clipOut, s: clipStill, p: clipPreview, " ": () => (v.paused ? v.play() : v.pause()),
+        const keys = { i: () => clipIn(true), o: () => clipOut(true), s: clipStill, p: clipPreview, " ": () => (v.paused ? v.play() : v.pause()),
           ",": () => { v.pause(); v.currentTime = Math.max(0, v.currentTime - 1 / 30); },
           ".": () => { v.pause(); v.currentTime = Math.min(v.duration, v.currentTime + 1 / 30); } };
         if (keys[k]) { e.preventDefault(); keys[k](); return; }

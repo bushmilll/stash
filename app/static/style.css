@@ -456,7 +456,8 @@ code { font-family: var(--mono); font-size: var(--fs-xs); background: var(--cell
 .grid.frames .tile.sel:hover .box::after { box-shadow: inset 0 0 0 3px var(--signal); }
 
 /* ---------- filter bar ---------- */
-.filters { display: flex; align-items: stretch; min-height: 38px; border-bottom: 1px solid var(--rule); flex-wrap: wrap; }
+.filters { display: flex; align-items: stretch; min-height: 38px; border-bottom: 1px solid var(--rule); flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+.filters::-webkit-scrollbar { display: none; }
 .filters .cell { border-left: 1px solid var(--rule-soft); padding: 0 12px; height: auto; min-height: 38px; }
 .filters .cell:first-child { border-left: 0; padding-left: var(--pad); }
 .filters select { font-size: var(--fs-xs); padding: 0; max-width: 150px; }
@@ -486,7 +487,7 @@ code { font-family: var(--mono); font-size: var(--fs-xs); background: var(--cell
 .dropzone div { border: 2px dashed var(--paper); color: var(--paper); padding: 40px 56px; font-size: 22px; font-weight: 500; text-transform: uppercase; letter-spacing: -.01em; background: rgba(0,0,0,.4); }
 
 /* search: where the match is */
-.hitchip { position: absolute; left: 6px; top: 6px; z-index: 3; background: var(--signal); color: #000; font: 500 10px var(--mono); padding: 2px 5px; pointer-events: none; }
+.hitchip { position: absolute; left: 30px; top: 6px; z-index: 3; background: var(--signal); color: #000; font: 500 10px var(--mono); padding: 2px 5px; pointer-events: none; }
 
 /* search learning + techniques */
 .tile .nomatch { position: absolute; right: 6px; top: 6px; background: #000; color: #fff; font: 400 10px var(--mono); text-transform: uppercase; padding: 2px 6px; display: none; z-index: 6; cursor: pointer; }
@@ -567,3 +568,31 @@ code { font-family: var(--mono); font-size: var(--fs-xs); background: var(--cell
 .side-empty { padding: 8px var(--pad); color: var(--ink-3); font-size: var(--fs-xs); text-transform: uppercase; }
 #preview.on, #clipPreview.on { background: var(--signal); color: #000; }
 .deck-row .cell:disabled, .clip-row .cell:disabled { opacity: .35; pointer-events: none; }
+
+.filters .menu-cell { flex-shrink: 0; }
+.filters .menu-cell:first-child .pick { padding-left: var(--pad); }
+.pick.compact { gap: 6px; padding: 0 12px; }
+.pick.compact .lbl { color: var(--ink-2); }
+.pick.compact.on .lbl { color: var(--paper); opacity: .6; }
+.pick.compact .pv { max-width: 130px; }
+.chip-swatch { width: 12px; height: 12px; border: 1px solid var(--rule); flex-shrink: 0; }
+.color-pop { padding: 12px; gap: 10px; }
+.color-pop .swatch-row { display: grid; grid-template-columns: repeat(7, 22px); gap: 6px; }
+.color-pop .swatch-row button { width: 22px; height: 22px; border: 1px solid var(--rule); padding: 0; cursor: pointer; }
+.color-pop .swatch-row button.on { box-shadow: 0 0 0 2px var(--signal); }
+.color-pop input[type=color] { width: 22px; height: 22px; padding: 0; border: 1px solid var(--rule); background: none; cursor: pointer; }
+.filters .clear-cell { flex-shrink: 0; font-size: var(--fs-xs); }
+.filters .analyzing { flex-shrink: 0; align-self: center; padding: 0 12px; }
+
+/* select box on tiles (shows on hover, stays while anything is selected) */
+.tile .selbox { position: absolute; left: 6px; top: 6px; width: 16px; height: 16px; border: 1.5px solid #fff; background: rgba(0,0,0,.35); z-index: 6; display: none; cursor: pointer; box-shadow: 0 0 0 1px rgba(0,0,0,.4); }
+.tile:hover .selbox, .grid.selecting .tile .selbox, .tile.sel .selbox { display: block; }
+.tile.sel .selbox { background: var(--signal); border-color: var(--signal); }
+.tile.sel .selbox::after { content: ""; position: absolute; left: 4px; top: 0px; width: 4px; height: 9px; border: solid #000; border-width: 0 2px 2px 0; transform: rotate(45deg); }
+
+/* moodboard slides */
+.paper.paged { outline: 0; }
+.page-bg { position: absolute; left: 0; width: 100%; z-index: 0; outline: 1px solid var(--rule); pointer-events: none; }
+.page-no { position: absolute; left: 0; bottom: 100%; margin-bottom: 14px; font: 400 22px var(--mono); color: var(--ink-3); text-transform: uppercase; white-space: nowrap; }
+.board-opts .tc { font-family: var(--mono); font-size: var(--fs-xs); min-width: 16px; }
+.board-opts .menu-cell .pick { font-size: var(--fs-s); }

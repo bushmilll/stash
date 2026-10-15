@@ -108,30 +108,43 @@ function askConfirm(title, { text, label = "OK", danger = false } = {}) {
 // Stash's own dropdown (instead of the Mac's pop-up menus). Works like a <select>: .value, onchange.
 // options: [{ value, label, count?, group? }]; multi: several values, kept as "a,b".
 let openMenu = null;
+// a menu that's open while its bar redraws (counts update after every pick) moves over to the new button
+function reattachMenu(root) {
+  if (!openMenu?.key || document.body.contains(openMenu.btn)) return;
+  const nb = root.querySelector(`[data-menu-key="${openMenu.key}"]`);
+  const top = openMenu.pop.scrollTop;
+  if (nb && nb._open) nb._open(top); else closeMenu();
+}
 function closeMenu() { if (openMenu) { openMenu.pop.remove(); openMenu.btn.classList.remove("open"); openMenu = null; } }
 document.addEventListener("pointerdown", (e) => { if (openMenu && !openMenu.pop.contains(e.target) && !openMenu.btn.contains(e.target)) closeMenu(); }, true);
 document.addEventListener("keydown", (e) => { if (openMenu && e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeMenu(); } }, true);
 window.addEventListener("resize", closeMenu);
-function pick({ options = [], value = "", multi = false, label = "", placeholder = "", title = "", cls = "", plain = false, align = "left" } = {}) {
-  const btn = h("button", { type: "button", class: "pick" + (plain ? " plain" : "") + (cls ? " " + cls : ""), title, "aria-haspopup": "listbox" });
+function pick({ options = [], value = "", multi = false, label = "", placeholder = "", title = "", cls = "", plain = false, align = "left", key = "", compact = false } = {}) {
+  const btn = h("button", { type: "button", class: "pick" + (plain ? " plain" : "") + (compact ? " compact" : "") + (cls ? " " + cls : ""), title, "aria-haspopup": "listbox" });
+  if (key) btn.dataset.menuKey = key;
   let cur = multi ? String(value || "").split(",").filter(Boolean) : String(value ?? "");
   const opts = () => btn._options;
   const text = () => {
     if (multi) {
-      if (!cur.length) return placeholder || "Any";
+      if (!cur.length) return compact ? "" : (placeholder || "Any");
       const names = cur.map((v) => opts().find((o) => String(o.value) === v)?.label || v);
+      if (compact) return names.length > 1 ? `${names[0]} +${names.length - 1}` : names[0];
       return names.length > 2 ? `${names[0]} +${names.length - 1}` : names.join(", ");
     }
     const o = opts().find((o) => String(o.value) === cur);
     return o ? o.label : placeholder;
   };
   const draw = () => {
-    fill(btn, label ? h("span", { class: "lbl" }, label) : null, h("span", { class: "pv" }, text()), h("span", { class: "caret" }));
+    const t = text();
+    fill(btn, label ? h("span", { class: "lbl" }, label) : null, t ? h("span", { class: "pv" }, t) : null, h("span", { class: "caret" }));
     btn.classList.toggle("on", multi && cur.length > 0);
   };
   const fire = () => btn.dispatchEvent(new Event("change"));
   const open = () => {
     if (openMenu?.btn === btn) return closeMenu();
+    doOpen();
+  };
+  const doOpen = (scrollTop = 0) => {
     closeMenu();
     const pop = h("div", { class: "menu-pop", role: "listbox" });
     const rows = () => {
@@ -163,8 +176,10 @@ function pick({ options = [], value = "", multi = false, label = "", placeholder
     else { pop.style.top = r.bottom + "px"; pop.style.maxHeight = below + "px"; }
     pop.style.left = left + "px";
     btn.classList.add("open");
-    openMenu = { btn, pop };
+    pop.scrollTop = scrollTop;
+    openMenu = { btn, pop, key };
   };
+  btn._open = doOpen;
   btn.addEventListener("click", open);
   Object.defineProperty(btn, "value", {
     get: () => (multi ? cur.join(",") : cur),
@@ -443,50 +458,82 @@ function renderScope() {
 }
 function renderFilters() {
   const f = S.filter, fc = S.facets || {};
-  const sw = h("div", { class: "swatch-row" },
-    ...SWATCHES.map((c) => h("button", { class: f.color === c ? "on" : "", style: `background:${c}`, title: `Frames featuring ${c}`, "aria-label": `Color ${c}`,
-      onclick: () => updateFilter({ color: f.color === c ? null : c }) })));
-  const custom = h("input", { type: "color", value: f.color || "#c89723", title: "Pick any color", "aria-label": "Pick any color" });
-  custom.onchange = () => updateFilter({ color: custom.value });
-  sw.append(custom);
-  if (f.color && !SWATCHES.includes(f.color)) sw.append(h("button", { class: "on", style: `background:${f.color}`, title: "Clear color", onclick: () => updateFilter({ color: null }) }));
-  const menu = (label, key, options, title) => {
-    const m = pick({ label, multi: true, value: f[key] || "", options, title, placeholder: "Any" });
+  const cell = (el) => h("div", { class: "cell menu-cell" }, el);
+  const menu = (label, key, options, extra = {}) => {
+    const m = pick({ label, key, multi: true, compact: true, value: f[key] || "", options, ...extra });
     m.onchange = () => updateFilter({ [key]: m.value || null });
-    return h("div", { class: "cell menu-cell" }, m);
+    return cell(m);
   };
-  // techniques: one menu per category, like a shot library; picks in a menu widen, menus narrow each other
+  // techniques: picks in one menu widen, menus narrow each other
   const tc = fc.tech || {}, techSel = (f.tech || "").split(",").filter(Boolean);
-  const techMenus = (S.tech?.groups || []).map((g) => {
-    const tags = S.tech.tags.filter((t) => t.group === g);
-    const mine = techSel.filter((t) => tags.some((x) => x.tag === t));
-    if (!tags.some((t) => tc[t.tag]) && !mine.length) return null;
-    const m = pick({ label: g, multi: true, value: mine.join(","), placeholder: "Any",
-      title: "Tagged on your Mac. Results start at the moment it shows up.",
-      options: tags.filter((t) => tc[t.tag] || mine.includes(t.tag)).map((t) => ({ value: t.tag, label: t.label, count: tc[t.tag] || 0 })) });
+  const groupTags = (g) => (S.tech?.tags || []).filter((t) => t.group === g);
+  const techOpts = (g) => groupTags(g).filter((t) => tc[t.tag] || techSel.includes(t.tag)).map((t) => ({ value: t.tag, label: t.label, count: tc[t.tag] || 0 }));
+  const setTech = (g, vals) => {
+    const others = techSel.filter((t) => !groupTags(g).some((x) => x.tag === t));
+    updateFilter({ tech: [...others, ...vals].join(",") || null });
+  };
+  const techMenu = (g, label = g) => {
+    const tags = groupTags(g);
+    const m = pick({ label, key: "tech:" + g, multi: true, compact: true, value: techSel.filter((t) => tags.some((x) => x.tag === t)).join(","),
+      title: "Tagged on your Mac. Results start at the moment it shows up.", options: techOpts(g) });
+    m.onchange = () => setTech(g, m.value.split(",").filter(Boolean));
+    return cell(m);
+  };
+  const lookOpts = (k) => { const counts = fc[k] || {}; return LOOK[k][1].map(([v, l]) => ({ v, l, count: counts[v] || 0 })); };
+  // Look: the look tags, plus Tone / Saturation / Contrast tucked under "More"
+  const lookMenu = (() => {
+    const mine = [...techSel.filter((t) => groupTags("Look").some((x) => x.tag === t)).map((t) => "tech:" + t),
+      ...["tone", "sat", "contrast"].flatMap((k) => (f[k] || "").split(",").filter(Boolean).map((v) => k + ":" + v))];
+    const options = [
+      ...techOpts("Look").map((o) => ({ ...o, value: "tech:" + o.value, group: "Look" })),
+      ...["tone", "sat", "contrast"].flatMap((k) => lookOpts(k).map((o) => ({ value: k + ":" + o.v, label: o.l + (k === "contrast" ? " contrast" : ""), count: o.count, group: "More / " + LOOK[k][0] }))),
+    ];
+    const m = pick({ label: "Look", key: "look", multi: true, compact: true, value: mine.join(","), options });
     m.onchange = () => {
-      const others = techSel.filter((t) => !tags.some((x) => x.tag === t));
-      updateFilter({ tech: [...others, ...m.value.split(",").filter(Boolean)].join(",") || null });
+      const vals = m.value.split(",").filter(Boolean), by = (p) => vals.filter((v) => v.startsWith(p + ":")).map((v) => v.slice(p.length + 1));
+      const others = techSel.filter((t) => !groupTags("Look").some((x) => x.tag === t));
+      updateFilter({ tech: [...others, ...by("tech")].join(",") || null, tone: by("tone").join(",") || null, sat: by("sat").join(",") || null, contrast: by("contrast").join(",") || null });
     };
-    return h("div", { class: "cell menu-cell" }, m);
-  });
+    return cell(m);
+  })();
   const cc = fc.content || {};
   const ccTotal = Object.values(cc).reduce((a, b) => a + b, 0);
-  const contentSel = ccTotal || f.content ? menu("Content", "content",
-    CONTENT.map(([v, l]) => ({ value: v, label: l, count: v === "notfilm" ? ccTotal - (cc.film || 0) : cc[v] || 0 })), "What each save shows, tagged by AI on your Mac") : null;
-  const selects = Object.entries(LOOK).map(([k, [label, opts]]) => {
-    const counts = fc[k] || {}, mine = (f[k] || "").split(",");
-    return menu(label, k, opts.filter(([v]) => k !== "ar" || counts[v] || mine.includes(v)).map(([v, l]) => ({ value: v, label: l, count: counts[v] || 0 })));
-  });
+  const counts = (k) => fc[k] || {};
+  const aspectOpts = LOOK.ar[1].filter(([v]) => counts("ar")[v] || (f.ar || "").split(",").includes(v)).map(([v, l]) => ({ value: v, label: l, count: counts("ar")[v] || 0 }));
   const active = LOOK_KEYS.some((k) => f[k]);
   fill($("#filters"),
-    ...techMenus,
-    contentSel,
-    h("div", { class: "cell" }, h("span", { class: "lbl" }, "Color"), sw),
-    ...selects,
+    menu("Content", "content", CONTENT.map(([v, l]) => ({ value: v, label: l, count: v === "notfilm" ? ccTotal - (cc.film || 0) : cc[v] || 0 })), { title: "What each save shows, tagged by AI on your Mac" }),
+    menu("Aspect", "ar", aspectOpts),
+    techMenu("Frame Size"), techMenu("Shot Type"), techMenu("Composition"), techMenu("Movement"),
+    lookMenu,
+    menu("Temperature", "temp", lookOpts("temp").map((o) => ({ value: o.v, label: o.l, count: o.count }))),
+    cell(colorButton()),
     h("span", { class: "spacer" }),
-    fc.pending ? h("span", { class: "analyzing" }, `Analyzing ${fc.pending} images…`) : null,
-    active ? h("button", { class: "cell", onclick: () => updateFilter(Object.fromEntries(LOOK_KEYS.map((k) => [k, null]))) }, "Clear filters") : null);
+    fc.pending ? h("span", { class: "analyzing" }, `Analyzing ${fc.pending}…`) : null,
+    active ? h("button", { class: "cell clear-cell", onclick: () => updateFilter(Object.fromEntries(LOOK_KEYS.map((k) => [k, null]))) }, "Clear") : null);
+  reattachMenu($("#filters"));
+}
+// Color: one button that opens the swatches
+function colorButton() {
+  const f = S.filter;
+  const btn = h("button", { type: "button", class: "pick compact" + (f.color ? " on" : ""), "data-menu-key": "color", title: "Frames featuring a color" },
+    h("span", { class: "lbl" }, "Color"), f.color ? h("span", { class: "chip-swatch", style: `background:${f.color}` }) : null, h("span", { class: "caret" }));
+  btn._open = () => {
+    closeMenu();
+    const custom = h("input", { type: "color", value: f.color || "#c89723", title: "Pick any color", "aria-label": "Pick any color" });
+    custom.onchange = () => { closeMenu(); updateFilter({ color: custom.value }); };
+    const pop = h("div", { class: "menu-pop color-pop" },
+      h("div", { class: "swatch-row" }, ...SWATCHES.map((c) => h("button", { class: f.color === c ? "on" : "", style: `background:${c}`, title: c, "aria-label": `Color ${c}`,
+        onclick: () => { closeMenu(); updateFilter({ color: f.color === c ? null : c }); } })), custom),
+      f.color ? h("button", { type: "button", class: "menu-clear", onclick: () => { closeMenu(); updateFilter({ color: null }); } }, "Clear color") : null);
+    document.body.append(pop);
+    const r = btn.getBoundingClientRect();
+    pop.style.top = r.bottom + "px"; pop.style.left = Math.max(8, Math.min(r.left, innerWidth - pop.offsetWidth - 8)) + "px";
+    btn.classList.add("open");
+    openMenu = { btn, pop, key: "color" };
+  };
+  btn.addEventListener("click", () => (openMenu?.btn === btn ? closeMenu() : btn._open()));
+  return btn;
 }
 // counts follow what you've already picked, so every menu only offers what's actually there
 let facetGen = 0;
@@ -569,7 +616,7 @@ function frameRow(items, rh) {
 }
 function layout(reset) {
   const grid = $("#grid"), n = colCount();
-  grid.className = "grid " + S.view;
+  grid.className = "grid " + S.view + (S.selected.size ? " selecting" : "");
   $("#viewIndex").classList.toggle("on", S.view === "index");
   $("#viewFrames").classList.toggle("on", S.view === "frames");
   if (S.view === "frames") {
@@ -583,6 +630,27 @@ function layout(reset) {
     if (reset) { fill(grid); cols = []; S.items.forEach((p, i) => place(p, i)); }
     return;
   }
+}
+// rebuild the grid without losing your place (removing a tile shouldn't send you back to the top)
+function relayoutInPlace(gone = []) {
+  // anchor on a tile you're looking at (one that's staying), so it stays put on screen while the rows re-flow
+  const tiles = [...document.querySelectorAll("#grid .tile")].filter((t) => !gone.includes(Number(t.dataset.id)));
+  const anchor = tiles.find((t) => t.getBoundingClientRect().bottom > 80);
+  const id = anchor?.dataset.id, off = anchor ? anchor.getBoundingClientRect().top : 0;
+  const grid = $("#grid");
+  grid.style.minHeight = grid.offsetHeight + "px";
+  layout(true);
+  const settle = () => {
+    const el = id && document.querySelector(`#grid .tile[data-id="${id}"]`);
+    if (!el) return;
+    const d = el.getBoundingClientRect().top - off;
+    if (Math.abs(d) < 1) return;
+    const main = document.querySelector(".main");
+    const sc = main && main.scrollHeight > main.clientHeight ? main : document.scrollingElement;
+    sc.scrollTop += d;
+  };
+  settle();
+  requestAnimationFrame(() => { grid.style.minHeight = ""; settle(); setTimeout(settle, 120); });
 }
 function place(p, i) {
   if (S.view === "frames") return fr.pending.push([p, i]);
@@ -630,6 +698,8 @@ function tile(p, i, ratio) {
     }
     openViewer(i);
   });
+  box.append(h("span", { class: "selbox", role: "checkbox", "aria-label": "Select", title: "Select (or ⌘-click the tile)",
+    onclick: (e) => { e.stopPropagation(); e.preventDefault(); toggleSelect(p.id, el, e.shiftKey ? i : null); } }));
   if (searchActive() && S.aiOn) {
     box.append(h("span", { class: "nomatch", role: "button", title: "Not what I searched for: hide it and teach search", onclick: (e) => { e.stopPropagation(); notAMatch(p); } }, "Not a match"));
   }
@@ -716,6 +786,16 @@ function toggleSelect(id, el, rangeIndex) {
   document.querySelectorAll(".tile").forEach((t) => t.classList.toggle("sel", S.selected.has(Number(t.dataset.id))));
   renderSelbar();
 }
+async function trashSelected() {
+  const moved = [...S.selected];
+  if (!moved.length || S.filter.trashed) return;
+  await api("/api/posts/trash", { method: "POST", body: { ids: moved } });
+  toast(`Moved ${moved.length} to trash`, { action: { label: "Undo", fn: async () => { await api("/api/posts/trash", { method: "POST", body: { ids: moved, restore: true } }); loadSidebar(); reload(); } } });
+  // take them out of the grid where they are, without jumping to the top
+  S.items = S.items.filter((p) => !moved.includes(p.id));
+  if (S.total) S.total -= moved.length;
+  clearSelection(); relayoutInPlace(moved); renderScope(); loadSidebar();
+}
 function clearSelection() {
   S.selected.clear(); lastSelIndex = null;
   document.querySelectorAll(".tile.sel").forEach((t) => t.classList.remove("sel"));
@@ -724,6 +804,7 @@ function clearSelection() {
 function renderSelbar() {
   const n = S.selected.size, bar = $("#selbar");
   bar.hidden = !n;
+  $("#grid").classList.toggle("selecting", n > 0);   // keep every tile's box visible while picking
   if (!n) return;
   const ids = () => [...S.selected];
   const count = h("span", { id: "selCount" }, `${n} selected`);
@@ -770,11 +851,7 @@ function renderSelbar() {
       toast(`Removed ${n} from <b>${esc(S.filter.collection)}</b>`); done(); } }, "Remove from this one") : null,
     boards,
     h("button", { onclick: () => exportDialog({ ids: ids(), name: "Stash selection", count: n }) }, "Export"),
-    h("button", { class: "ghost danger", onclick: async () => {
-      const moved = ids();
-      await api("/api/posts/trash", { method: "POST", body: { ids: moved } });
-      toast(`Moved ${moved.length} to trash`, { action: { label: "Undo", fn: async () => { await api("/api/posts/trash", { method: "POST", body: { ids: moved, restore: true } }); loadSidebar(); reload(); } } });
-      done(); } }, "Trash"),
+    h("button", { class: "ghost danger", title: "Move to trash (Delete)", onclick: trashSelected }, "Trash"),
     h("span", { class: "grow" }),
     h("button", { onclick: clearSelection }, "Clear"));
 }
@@ -794,7 +871,7 @@ function learnSignal(signal, posts, extra = {}) {
 function notAMatch(p) {
   learnSignal("notmatch", p);
   const i = S.items.findIndex((x) => x.id === p.id);
-  if (i >= 0) { S.items.splice(i, 1); if (S.total) S.total--; layout(true); renderScope(); }
+  if (i >= 0) { S.items.splice(i, 1); if (S.total) S.total--; relayoutInPlace([p.id]); renderScope(); }
   toast("Got it. Searches like this will leave it out and lean away from shots like it.");
 }
 
@@ -1436,7 +1513,7 @@ document.addEventListener("keydown", (e) => {
       escape: closeViewer,
       arrowright: () => { if (S.viewerIndex < S.items.length - 1) openViewer(S.viewerIndex + 1); },
       arrowleft: () => { if (S.viewerIndex > 0) openViewer(S.viewerIndex - 1); },
-      " ": togglePlay, i: setIn, o: setOut, p: togglePreview, g: grabFrame, m: toggleMute,
+      " ": togglePlay, i: toggleIn, o: toggleOut, p: togglePreview, g: grabFrame, m: toggleMute,
       ",": () => step(-1), ".": () => step(1),
       f: () => S.post && $(".fav-btn")?.click(),
       arrowdown: () => { if (multi) { S.slide = (S.slide + 1) % S.post.media.length; renderStage(); renderInfo(); } },
@@ -1449,6 +1526,7 @@ document.addEventListener("keydown", (e) => {
   if (typing) { if (e.key === "Escape") document.activeElement.blur(); return; }
   if (e.key === "/") { e.preventDefault(); $("#q").focus(); }
   else if (e.key === "Escape") { if (!$("#drawer").hidden) closeDrawer(); else clearSelection(); }
+  else if ((e.key === "Delete" || e.key === "Backspace") && S.selected.size && $("#drawer").hidden) { e.preventDefault(); trashSelected(); }
 });
 window.addEventListener("hashchange", () => { readHash(); reload(); renderSidebar(); });
 
