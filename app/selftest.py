@@ -87,6 +87,13 @@ def run(port):
         check("movement: pan detected", "pan" in mt, str(mt))
         mt2 = techniques.analyze_motion(vid, 2)
         check("movement: no pan on a still shot", "pan" not in mt2 and "whip" not in mt2, str(mt2))
+        # composition is measured from the picture: a figure on the left reads as left heavy
+        from PIL import ImageDraw
+        comp = Image.new("RGB", (960, 540), (70, 70, 80)); cd = ImageDraw.Draw(comp)
+        cd.ellipse([190, 170, 250, 230], fill=(10, 10, 10)); cd.rectangle([165, 225, 275, 540], fill=(10, 10, 10))
+        comp.save(tmp / "comp.png")
+        ct, cx = techniques.composition(tmp / "comp.png")
+        check("composition: left heavy", "left_heavy" in ct, f"{sorted(ct)} weight at {cx:.2f}")
         # moodboard video: one still layer + one looping tile
         from app import boardvideo
         Image.new("RGB", (640, 360), (236, 234, 229)).save(tmp / "layer0.png")

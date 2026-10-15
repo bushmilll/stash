@@ -38,8 +38,20 @@ def fts_query(q):
 
 # ---------- library ----------
 
-async def list_posts(request):
-    qp = request.query_params
+LOOK_COLS = {"tone": "a.tone", "sat": "a.sat", "temp": "a.temp", "contrast": "a.contrast", "ar": "a.ar_label"}
+FACET_KEYS = ("tone", "sat", "temp", "contrast", "ar", "content", "tech")
+
+
+def search_terms(qp):
+    """Search chips plus whatever is still typed: every term must match."""
+    terms = [t.strip() for t in (qp.get("chips") or "").split("|") if t.strip()]
+    if qp.get("q", "").strip():
+        terms.append(qp["q"].strip())
+    return list(dict.fromkeys(terms))
+
+
+def _where(qp, skip=()):
+    """SQL conditions for everything except the search terms and ranked modes."""
     where, args, joins = [], [], []
     status = qp.get("status", "ready")
     if qp.get("trashed"):
@@ -49,15 +61,6 @@ async def list_posts(request):
         if status != "all":
             where.append("p.status=?")
             args.append(status)
-    sem_q = None
-    if qp.get("q") and ai.ready() and ai._load_index()["mat"] is not None:
-        sem_q = qp["q"]          # visual search: ranked below, blended with caption matches
-    elif qp.get("q"):
-        fq = fts_query(qp["q"])
-        if fq:
-            joins.append("JOIN search s ON s.rowid=p.id")
-            where.append("search MATCH ?")
-            args.append(fq)
     if qp.get("collection"):
         where.append("p.id IN (SELECT pc.post_id FROM post_collections pc JOIN collections x "
                      "ON x.id=pc.collection_id WHERE x.name=?)")
@@ -77,58 +80,77 @@ async def list_posts(request):
         where.append("NOT EXISTS (SELECT 1 FROM media m WHERE m.post_id=p.id AND m.kind='video')")
     if qp.get("favorite"):
         where.append("p.favorite=1")
-    tech = qp.get("tech")
-    if tech:
-        where.append("EXISTS (SELECT 1 FROM techniques tq JOIN media tm ON tm.id=tq.media_id "
-                     "WHERE tm.post_id=p.id AND tq.tag=? AND tq.source!='no')")
-        args.append(tech)
-    # look filters (computed from the pixels of the cover image)
-    look = {k: qp.get(k) for k in ("tone", "sat", "temp", "contrast", "ar") if qp.get(k)}
-    content = qp.get("content")
+    # techniques: several picks in one category widen (any of them), categories narrow each other
+    tech = [t for t in (qp.get("tech") or "").split(",") if t in techniques.TAGS
+            and "tech" not in skip and "tech:" + techniques.TAGS[t][1] not in skip]
+    by_group = {}
+    for t in tech:
+        by_group.setdefault(techniques.TAGS[t][1], []).append(t)
+    for tags in by_group.values():
+        where.append(f"EXISTS (SELECT 1 FROM techniques tq JOIN media tm ON tm.id=tq.media_id WHERE tm.post_id=p.id "
+                     f"AND tq.tag IN ({','.join('?' * len(tags))}) AND tq.source!='no')")
+        args.extend(tags)
+    # look filters (computed from the pixels of the cover image); a comma means any of these
+    look = {k: qp.get(k) for k in LOOK_COLS if qp.get(k) and k not in skip}
+    content = None if "content" in skip else qp.get("content")
     if look or content:
         joins.append("JOIN media cm ON cm.post_id=p.id AND cm.idx=0 JOIN analysis a ON a.media_id=cm.id")
-    if content == "notfilm":
-        where.append("COALESCE(a.content_user, a.content) IS NOT NULL AND COALESCE(a.content_user, a.content) != 'film'")
-    elif content:
-        where.append("COALESCE(a.content_user, a.content) = ?")
-        args.append(content)
-    if look:
-        col = {"tone": "a.tone", "sat": "a.sat", "temp": "a.temp", "contrast": "a.contrast", "ar": "a.ar_label"}
-        for k, v in look.items():
-            vals = v.split(",")
-            where.append(f"{col[k]} IN ({','.join('?' * len(vals))})")
+    if content:
+        vals = content.split(",")
+        conds = []
+        if "notfilm" in vals:
+            conds.append("(COALESCE(a.content_user, a.content) IS NOT NULL AND COALESCE(a.content_user, a.content) != 'film')")
+            vals = [v for v in vals if v != "notfilm"]
+        if vals:
+            conds.append(f"COALESCE(a.content_user, a.content) IN ({','.join('?' * len(vals))})")
             args.extend(vals)
-    limit = min(int(qp.get("limit", 60)), 200)
-    offset = int(qp.get("offset", 0))
-    # ranked searches: by color, by similarity to a post, or by an uploaded image
-    ranked = None
-    hits = {}
-    if sem_q:
-        res = await run_in_threadpool(ai.search, sem_q)
-        fq = fts_query(sem_q)
-        text_ids = {r[0] for r in db.conn().execute("SELECT rowid FROM search WHERE search MATCH ?", (fq,))} if fq else set()
+        where.append("(" + " OR ".join(conds) + ")")
+    for k, v in look.items():
+        vals = v.split(",")
+        where.append(f"{LOOK_COLS[k]} IN ({','.join('?' * len(vals))})")
+        args.extend(vals)
+    return joins, where, args
+
+
+async def _matching(qp, skip=()):
+    """-> (ranked ids or None, {post_id: (media idx, t)}, joins, where, args). ranked=None means plain sort order."""
+    joins, where, args = _where(qp, skip)
+    terms = search_terms(qp)
+    tech_terms = [t for t in terms if techniques.tag_for_query(t)]
+    vis_terms = [t for t in terms if t not in tech_terms]
+    for t in tech_terms:   # a technique typed as a search term works like picking it (and narrows)
+        where.append("EXISTS (SELECT 1 FROM techniques tq JOIN media tm ON tm.id=tq.media_id WHERE tm.post_id=p.id "
+                     "AND tq.tag=? AND tq.source!='no')")
+        args.append(techniques.tag_for_query(t))
+    ranked, hits = None, {}
+    use_ai = vis_terms and ai.ready() and ai._load_index()["mat"] is not None
+    if vis_terms and not use_ai:
+        fq = " ".join(filter(None, (fts_query(t) for t in vis_terms)))
+        if fq:
+            joins = joins + ["JOIN search s ON s.rowid=p.id"]
+            where.append("search MATCH ?")
+            args.append(fq)
+    elif use_ai:
+        # every term has to show up (in the frames or the caption); score = average match across terms
+        per = []
+        for t in vis_terms:
+            res = await run_in_threadpool(ai.search, t)
+            fq = fts_query(t)
+            text_ids = {r[0] for r in db.conn().execute("SELECT rowid FROM search WHERE search MATCH ?", (fq,))} if fq else set()
+            mid = float(np.median([s for _, s, _, _ in res])) if res else 0.0
+            d = {pid: (s + (0.03 if pid in text_ids else 0), idx, t_) for pid, s, idx, t_ in res}
+            for pid in text_ids - set(d):     # caption says it, pixels less sure: middle of the list
+                d[pid] = (mid, None, None)
+            per.append(d)
+        common = set.intersection(*(set(d) for d in per)) if per else set()
         scored = {}
-        for pid, s, idx, t in res:
-            scored[pid] = s + (0.03 if pid in text_ids else 0)
-            hits[pid] = (idx, t)
-        if res:
-            mid = float(np.median([s for _, s, _, _ in res]))
-            for pid in text_ids - set(scored):     # caption says it, pixels less sure: middle of the list
-                scored[pid] = mid
-        else:
-            for pid in text_ids:
-                scored[pid] = 0
-        tag = techniques.tag_for_query(sem_q)
-        if tag:   # typed a technique ("whip pan", "low angle"): posts tagged with it lead
-            hidden = (await run_in_threadpool(learn.related, learn.norm_q(sem_q)))[1]
-            top = max(scored.values(), default=0.0)
-            for pid, idx, t, sc in db.conn().execute(
-                    "SELECT tm.post_id, tm.idx, tq.t, MAX(tq.score) FROM techniques tq JOIN media tm ON tm.id=tq.media_id "
-                    "WHERE tq.tag=? AND tq.source!='no' GROUP BY tm.post_id", (tag,)):
-                if pid in hidden:
-                    continue
-                scored[pid] = top + 0.02 + 0.01 * float(sc or 0)
-                hits[pid] = (idx, t or 0)
+        for pid in common:
+            vals = [d[pid] for d in per]
+            scored[pid] = sum(v[0] for v in vals) / len(vals)
+            seen = [v for v in vals if v[1] is not None]
+            if seen:   # show the moment of the hardest-to-find thing
+                v = min(seen, key=lambda v: v[0])
+                hits[pid] = (v[1], v[2])
         ranked = [pid for pid, _ in sorted(scored.items(), key=lambda kv: -kv[1])]
     elif qp.get("similar"):
         v = analyze.vec_for_post(int(qp["similar"]))
@@ -136,66 +158,68 @@ async def list_posts(request):
     elif qp.get("simimg"):
         res = analyze.image_query(qp["simimg"])
         if res is None:
-            return err(410, "That image search has expired. Drop the image in again.")
+            raise HTTPException(410, "That image search has expired. Drop the image in again.")
         ranked = analyze.nearest(res["vec"], k=300)
+    return ranked, hits, joins, where, args
+
+
+def _sql_where(where):
+    return f"WHERE {' AND '.join(where)}" if where else ""
+
+
+async def matching_ids(qp, skip=()):
+    """Every post id that matches, in display order (used for counts and Select all)."""
+    ranked, hits, joins, where, args = await _matching(qp, skip)
+    c = db.conn()
     if ranked is not None or qp.get("color"):
-        base = (f"SELECT p.id, (SELECT a2.palette FROM media m2 JOIN analysis a2 ON a2.media_id=m2.id "
-                f"WHERE m2.post_id=p.id AND m2.idx=0) AS pal FROM posts p {' '.join(joins)} "
-                f"{'WHERE ' + ' AND '.join(where) if where else ''}")
-        cands = {r[0]: r[1] for r in db.conn().execute(base, args)}
-        if ranked is not None:
-            ids = [i for i in ranked if i in cands]
-        else:
-            ids = list(cands)
+        rows = c.execute(f"SELECT p.id, (SELECT a2.palette FROM media m2 JOIN analysis a2 ON a2.media_id=m2.id "
+                         f"WHERE m2.post_id=p.id AND m2.idx=0) FROM posts p {' '.join(joins)} {_sql_where(where)}", args)
+        cands = {r[0]: r[1] for r in rows}
+        ids = [i for i in ranked if i in cands] if ranked is not None else list(cands)
         if qp.get("color"):
             target = analyze.hex_to_lab(qp["color"])
             scored = [(analyze.color_score(cands[i], target), i) for i in ids]
-            if ranked is not None:   # keep similarity order, just drop non-matching colors
-                ids = [i for s_, i in scored if s_ >= 0.08]
-            else:
-                ids = [i for s_, i in sorted(scored, key=lambda t: -t[0]) if s_ >= 0.08]
-        if qp.get("ids_only"):
-            return JSONResponse({"ids": ids[:20000]})
-        c = db.conn()
-        page = ids[offset:offset + limit]
-        rows = {r["id"]: r for r in c.execute(f"SELECT * FROM posts WHERE id IN ({','.join('?' * len(page))})", page)} if page else {}
-        items = []
-        for i in page:
-            if i not in rows:
-                continue
-            if i in hits:   # show the item and the moment that matched the search
-                items.append(_with_hit(c, rows[i], *hits[i]))
-            else:
-                items.append(db.post_dict(c, rows[i]))
-        return JSONResponse({"items": items, "more": offset + limit < len(ids), "total": len(ids) if offset == 0 else None})
+            ids = [i for s_, i in scored if s_ >= 0.08] if ranked is not None else \
+                [i for s_, i in sorted(scored, key=lambda t: -t[0]) if s_ >= 0.08]
+        return ids, hits, True
     order = SORTS.get(qp.get("sort", "saved"), SORTS["saved"])
     if qp.get("sort") == "random" and qp.get("seed"):
-        # stable shuffle across pages
-        seed = int(qp["seed"]) % 100003
-        order = f"(p.id * 2654435761 + {seed}) % 1000003"
+        order = f"(p.id * 2654435761 + {int(qp['seed']) % 100003}) % 1000003"   # stable shuffle across pages
+    ids = [r[0] for r in c.execute(f"SELECT p.id FROM posts p {' '.join(joins)} {_sql_where(where)} ORDER BY {order}", args)]
+    return ids, hits, False
+
+
+async def list_posts(request):
+    qp = request.query_params
+    try:
+        ids, hits, ranked = await matching_ids(qp)
+    except HTTPException as e:
+        return err(e.status_code, e.detail)
     if qp.get("ids_only"):   # "Select all" in the current view
-        ids = [r[0] for r in db.conn().execute(
-            f"SELECT p.id FROM posts p {' '.join(joins)} {'WHERE ' + ' AND '.join(where) if where else ''} "
-            f"ORDER BY {order} LIMIT 20000", args)]
-        return JSONResponse({"ids": ids})
-    sql = (f"SELECT p.* FROM posts p {' '.join(joins)} "
-           f"{'WHERE ' + ' AND '.join(where) if where else ''} ORDER BY {order} LIMIT ? OFFSET ?")
+        return JSONResponse({"ids": ids[:20000]})
+    limit = min(int(qp.get("limit", 60)), 200)
+    offset = int(qp.get("offset", 0))
+    page = ids[offset:offset + limit]
     c = db.conn()
-    rows = c.execute(sql, args + [limit + 1, offset]).fetchall()
+    rows = {r["id"]: r for r in c.execute(f"SELECT * FROM posts WHERE id IN ({','.join('?' * len(page))})", page)} if page else {}
+    tech = [t for t in (qp.get("tech") or "").split(",") if t in techniques.TAGS] + \
+        [techniques.tag_for_query(t) for t in search_terms(qp) if techniques.tag_for_query(t)]
     items = []
-    for r in rows[:limit]:
+    for i in page:
+        if i not in rows:
+            continue
+        if i in hits:   # show the item and the moment that matched the search
+            items.append(_with_hit(c, rows[i], *hits[i]))
+            continue
         if tech:   # start each tile at the moment the technique shows up
-            h_ = c.execute("SELECT tm.idx, tq.t FROM techniques tq JOIN media tm ON tm.id=tq.media_id WHERE tm.post_id=? "
-                           "AND tq.tag=? AND tq.source!='no' ORDER BY tq.score DESC LIMIT 1", (r["id"], tech)).fetchone()
+            h_ = c.execute(f"SELECT tm.idx, tq.t FROM techniques tq JOIN media tm ON tm.id=tq.media_id WHERE tm.post_id=? "
+                           f"AND tq.tag IN ({','.join('?' * len(tech))}) AND tq.source!='no' ORDER BY tq.score DESC LIMIT 1",
+                           (i, *tech)).fetchone()
             if h_:
-                items.append(_with_hit(c, r, h_[0], h_[1] or 0))
+                items.append(_with_hit(c, rows[i], h_[0], h_[1] or 0))
                 continue
-        items.append(db.post_dict(c, r))
-    total = None
-    if offset == 0:
-        total = c.execute(f"SELECT COUNT(*) FROM posts p {' '.join(joins)} "
-                          f"{'WHERE ' + ' AND '.join(where) if where else ''}", args).fetchone()[0]
-    return JSONResponse({"items": items, "more": len(rows) > limit, "total": total})
+        items.append(db.post_dict(c, rows[i]))
+    return JSONResponse({"items": items, "more": offset + limit < len(ids), "total": len(ids) if offset == 0 else None})
 
 
 def _with_hit(c, row, idx, t):
@@ -217,10 +241,25 @@ async def get_post(request):
         return err(404, "Not found")
     d = db.post_dict(c, r, full=True)
     for m in d["media"]:
+        if m["kind"] == "video":   # how sharp the copy we have is
+            try:
+                size = db.media_path(m["path"]).stat().st_size
+                m["bitrate"] = round(size * 8 / m["duration"]) if m.get("duration") else None
+            except OSError:
+                m["bitrate"] = None
         m["techniques"] = [{"tag": tg, "label": techniques.TAGS[tg][0], "group": techniques.TAGS[tg][1], "source": src, "t": t}
                            for tg, src, t in c.execute("SELECT tag, source, t FROM techniques WHERE media_id=? AND source!='no' "
                                                        "ORDER BY score DESC", (m["id"],)) if tg in techniques.TAGS]
     return JSONResponse(d)
+
+
+async def redownload(request):
+    """Fetch this post's videos again and keep whichever copy is sharper."""
+    pid = request.path_params["id"]
+    with db.tx() as c:
+        c.execute("UPDATE media SET hq=0 WHERE post_id=? AND kind='video'", (pid,))
+    sync.upgrade_posts([pid])
+    return JSONResponse({"ok": True})
 
 
 async def technique_list(request):
@@ -309,7 +348,7 @@ async def sidebar(request):
         "GROUP BY t.id ORDER BY n DESC, t.name LIMIT 300")]
     creators = [dict(r) for r in c.execute(
         "SELECT username AS name, COUNT(*) AS n FROM posts WHERE status='ready' AND deleted_at IS NULL AND username!='' "
-        "GROUP BY username ORDER BY n DESC LIMIT 40")]
+        "GROUP BY username ORDER BY n DESC LIMIT 5000")]
     counts = dict(c.execute(
         "SELECT 'ready', COUNT(*) FROM posts WHERE status='ready' AND deleted_at IS NULL UNION ALL "
         "SELECT 'pending', COUNT(*) FROM posts WHERE status IN ('pending','failed') AND deleted_at IS NULL UNION ALL "
@@ -426,7 +465,11 @@ async def upload_export(request):
             files.update(importer.read_upload(up.filename or "upload.json", raw))
     if not files:
         return err(400, "No saved-posts JSON found. Make sure you requested the export in JSON format.")
-    result = await run_in_threadpool(importer.import_export, files, bool(db.load_settings().get("include_uncollected")))
+    if form.get("preview"):
+        return JSONResponse(await run_in_threadpool(importer.preview, files))
+    only = json.loads(form["collections"]) if form.get("collections") else None
+    uncollected = form.get("uncollected") == "1" if only is not None else bool(db.load_settings().get("include_uncollected"))
+    result = await run_in_threadpool(importer.import_export, files, uncollected, only)
     if result["posts_found"] == 0:
         return err(400, "Couldn't find any saved posts in that file. Use the JSON export, "
                         "and include 'Saved' in the information you request.")
@@ -438,6 +481,7 @@ async def settings(request):
         return JSONResponse(db.save_settings(await request.json()))
     s = db.load_settings()
     s["_gallery_dl"] = sync.HAVE_GDL
+    s["_signed_in"] = sync.SIGNIN["ok"]
     s["_ffmpeg"] = media.ffmpeg_ok()
     s["_desktop"] = os.environ.get("STASH_DESKTOP") == "1"
     from . import __version__
@@ -483,21 +527,42 @@ async def search_image(request):
 
 
 async def facets(request):
-    """Counts per look filter, for the filter menus."""
+    """Counts for every filter option, given everything else you've picked (so menus never offer dead ends)."""
+    qp = request.query_params
     c = db.conn()
+    base_ids = None
+    active_tech = {techniques.TAGS[t][1] for t in (qp.get("tech") or "").split(",") if t in techniques.TAGS}
+
+    async def ids_for(skip_key, active):
+        nonlocal base_ids
+        if not active:          # nothing picked here: same set as everything else
+            if base_ids is None:
+                base_ids = json.dumps((await matching_ids(qp))[0])
+            return base_ids
+        return json.dumps((await matching_ids(qp, skip=(skip_key,)))[0])
+
     out = {}
-    for k, col in (("tone", "tone"), ("sat", "sat"), ("temp", "temp"), ("contrast", "contrast"), ("ar", "ar_label")):
-        out[k] = {r[0]: r[1] for r in c.execute(
-            f"SELECT a.{col}, COUNT(*) FROM posts p JOIN media m ON m.post_id=p.id AND m.idx=0 "
-            f"JOIN analysis a ON a.media_id=m.id WHERE p.deleted_at IS NULL AND p.status='ready' AND a.{col} IS NOT NULL "
-            f"GROUP BY a.{col}")}
-    out["content"] = {r[0]: r[1] for r in c.execute(
-        "SELECT COALESCE(a.content_user, a.content), COUNT(*) FROM posts p JOIN media m ON m.post_id=p.id AND m.idx=0 "
-        "JOIN analysis a ON a.media_id=m.id WHERE p.deleted_at IS NULL AND p.status='ready' "
-        "AND COALESCE(a.content_user, a.content) IS NOT NULL GROUP BY 1")}
-    out["tech"] = {r[0]: r[1] for r in c.execute(
-        "SELECT tq.tag, COUNT(DISTINCT tm.post_id) FROM techniques tq JOIN media tm ON tm.id=tq.media_id "
-        "JOIN posts p ON p.id=tm.post_id WHERE p.deleted_at IS NULL AND p.status='ready' AND tq.source!='no' GROUP BY tq.tag")}
+    try:
+        for k, col in LOOK_COLS.items():
+            ids = await ids_for(k, bool(qp.get(k)))
+            out[k] = {r[0]: r[1] for r in c.execute(
+                f"SELECT {col}, COUNT(*) FROM posts p JOIN media m ON m.post_id=p.id AND m.idx=0 JOIN analysis a ON a.media_id=m.id "
+                f"WHERE p.id IN (SELECT value FROM json_each(?)) AND {col} IS NOT NULL GROUP BY 1", (ids,))}
+        ids = await ids_for("content", bool(qp.get("content")))
+        out["content"] = {r[0]: r[1] for r in c.execute(
+            "SELECT COALESCE(a.content_user, a.content), COUNT(*) FROM posts p JOIN media m ON m.post_id=p.id AND m.idx=0 "
+            "JOIN analysis a ON a.media_id=m.id WHERE p.id IN (SELECT value FROM json_each(?)) "
+            "AND COALESCE(a.content_user, a.content) IS NOT NULL GROUP BY 1", (ids,))}
+        out["tech"] = {}
+        for g in techniques.GROUPS:
+            ids = await ids_for("tech:" + g, g in active_tech)
+            tags = [t for t, (_, gg) in techniques.TAGS.items() if gg == g]
+            out["tech"].update({r[0]: r[1] for r in c.execute(
+                f"SELECT tq.tag, COUNT(DISTINCT tm.post_id) FROM techniques tq JOIN media tm ON tm.id=tq.media_id "
+                f"WHERE tm.post_id IN (SELECT value FROM json_each(?)) AND tq.source!='no' "
+                f"AND tq.tag IN ({','.join('?' * len(tags))}) GROUP BY tq.tag", (ids, *tags))})
+    except HTTPException as e:
+        return err(e.status_code, e.detail)
     out["pending"] = len(analyze.pending(100000))
     return JSONResponse(out)
 
@@ -977,6 +1042,7 @@ def create_app():
         Route("/api/posts/{id:int}", get_post),
         Route("/api/posts/{id:int}", update_post, methods=["PATCH"]),
         Route("/api/posts/{id:int}/zip", post_zip),
+        Route("/api/posts/{id:int}/redownload", redownload, methods=["POST"]),
         Route("/api/sidebar", sidebar),
         Route("/api/collections", create_collection, methods=["POST"]),
         Route("/api/collections/rename", rename_collection, methods=["POST"]),

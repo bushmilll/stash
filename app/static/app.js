@@ -104,7 +104,85 @@ function askConfirm(title, { text, label = "OK", danger = false } = {}) {
     { label, primary: !danger, danger, fn: (c) => { c(); resolve(true); } },
   ] }));
 }
+// ---------------- menus ----------------
+// Stash's own dropdown (instead of the Mac's pop-up menus). Works like a <select>: .value, onchange.
+// options: [{ value, label, count?, group? }]; multi: several values, kept as "a,b".
+let openMenu = null;
+function closeMenu() { if (openMenu) { openMenu.pop.remove(); openMenu.btn.classList.remove("open"); openMenu = null; } }
+document.addEventListener("pointerdown", (e) => { if (openMenu && !openMenu.pop.contains(e.target) && !openMenu.btn.contains(e.target)) closeMenu(); }, true);
+document.addEventListener("keydown", (e) => { if (openMenu && e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeMenu(); } }, true);
+window.addEventListener("resize", closeMenu);
+function pick({ options = [], value = "", multi = false, label = "", placeholder = "", title = "", cls = "", plain = false, align = "left" } = {}) {
+  const btn = h("button", { type: "button", class: "pick" + (plain ? " plain" : "") + (cls ? " " + cls : ""), title, "aria-haspopup": "listbox" });
+  let cur = multi ? String(value || "").split(",").filter(Boolean) : String(value ?? "");
+  const opts = () => btn._options;
+  const text = () => {
+    if (multi) {
+      if (!cur.length) return placeholder || "Any";
+      const names = cur.map((v) => opts().find((o) => String(o.value) === v)?.label || v);
+      return names.length > 2 ? `${names[0]} +${names.length - 1}` : names.join(", ");
+    }
+    const o = opts().find((o) => String(o.value) === cur);
+    return o ? o.label : placeholder;
+  };
+  const draw = () => {
+    fill(btn, label ? h("span", { class: "lbl" }, label) : null, h("span", { class: "pv" }, text()), h("span", { class: "caret" }));
+    btn.classList.toggle("on", multi && cur.length > 0);
+  };
+  const fire = () => btn.dispatchEvent(new Event("change"));
+  const open = () => {
+    if (openMenu?.btn === btn) return closeMenu();
+    closeMenu();
+    const pop = h("div", { class: "menu-pop", role: "listbox" });
+    const rows = () => {
+      const out = []; let g = null;
+      for (const o of opts()) {
+        if (o.group && o.group !== g) { g = o.group; out.push(h("div", { class: "menu-group" }, g)); }
+        const on = multi ? cur.includes(String(o.value)) : String(o.value) === cur;
+        out.push(h("button", { type: "button", class: "menu-row" + (on ? " on" : "") + (o.count === 0 && !on ? " dim" : ""), role: "option", "aria-selected": on ? "true" : "false",
+          onclick: () => {
+            const v = String(o.value);
+            if (multi) { cur = on ? cur.filter((x) => x !== v) : [...cur, v]; draw(); fill(pop, ...rows()); fire(); }
+            else { cur = v; draw(); closeMenu(); fire(); }
+          } },
+          multi ? h("span", { class: "box" }) : null, h("span", { class: "ml" }, o.label), o.count != null ? h("span", { class: "mc" }, pad(o.count)) : null));
+      }
+      if (multi && cur.length) out.push(h("button", { type: "button", class: "menu-clear", onclick: () => { cur = []; draw(); closeMenu(); fire(); } }, "Clear"));
+      if (!out.length) out.push(h("div", { class: "menu-group" }, "Nothing here yet"));
+      return out;
+    };
+    fill(pop, ...rows());
+    document.body.append(pop);
+    const r = btn.getBoundingClientRect();
+    pop.style.minWidth = Math.max(r.width, 200) + "px";
+    const pw = pop.offsetWidth, ph = pop.offsetHeight;
+    let left = align === "right" ? r.right - pw : r.left;
+    left = Math.max(8, Math.min(left, innerWidth - pw - 8));
+    const below = innerHeight - r.bottom - 8, above = r.top - 8;
+    if (ph > below && above > below) { pop.style.bottom = innerHeight - r.top + "px"; pop.style.maxHeight = above + "px"; }
+    else { pop.style.top = r.bottom + "px"; pop.style.maxHeight = below + "px"; }
+    pop.style.left = left + "px";
+    btn.classList.add("open");
+    openMenu = { btn, pop };
+  };
+  btn.addEventListener("click", open);
+  Object.defineProperty(btn, "value", {
+    get: () => (multi ? cur.join(",") : cur),
+    set: (v) => { cur = multi ? String(v || "").split(",").filter(Boolean) : String(v ?? ""); draw(); },
+  });
+  btn.setOptions = (o) => { btn._options = o; draw(); };
+  btn.setOptions(options);
+  return btn;
+}
+
 const DESKTOP = new URLSearchParams(location.search).has("app");
+{   // the Sort menu in the top bar
+  const sort = pick({ label: "Sort", value: "saved", options: [
+    { value: "saved", label: "Newest saves" }, { value: "saved_old", label: "Oldest saves" },
+    { value: "posted", label: "Newest posts" }, { value: "random", label: "Shuffle" }] });
+  sort.id = "sort"; sort.classList.add("plain-on");
+  document.getElementById("sortCell").append(sort);
+}
 function openExternal(url) {
   if (DESKTOP) api("/api/desktop/open-url", { method: "POST", body: { url } }).catch((e) => toast(esc(e.message), { error: true }));
   else window.open(url, "_blank", "noopener");
@@ -159,8 +237,29 @@ const SWATCHES = ["#c8102e", "#ff5a1f", "#f2b134", "#e9dcb8", "#5a8f3c", "#1fb5a
 function readHash() {
   const p = new URLSearchParams(location.hash.slice(1));
   S.filter = {};
-  for (const k of ["q", ...NAV_KEYS, ...LOOK_KEYS, ...RANK_KEYS]) if (p.get(k)) S.filter[k] = p.get(k);
+  for (const k of ["q", "chips", ...NAV_KEYS, ...LOOK_KEYS, ...RANK_KEYS]) if (p.get(k)) S.filter[k] = p.get(k);
   $("#q").value = S.filter.q || "";
+  renderChips();
+}
+// ---------------- stacked search ----------------
+// Enter turns what you typed into a chip; every chip has to match, so each one narrows the results
+const chipList_ = () => (S.filter.chips || "").split("|").filter(Boolean);
+const searchTerms = () => [...chipList_(), ...(S.filter.q ? [S.filter.q] : [])];
+const searchActive = () => searchTerms().length > 0;
+const searchLabel = () => searchTerms().join(" + ");
+function setChips(list) {
+  S.filter.chips = list.join("|");
+  if (!S.filter.chips) delete S.filter.chips;
+  renderChips();
+}
+function renderChips() {
+  const el = $("#chips");
+  if (!el) return;
+  fill(el, ...chipList_().map((t, i) => h("span", { class: "schip" }, t,
+    h("button", { type: "button", "aria-label": "Remove " + t, title: "Remove", onclick: (e) => {
+      e.preventDefault(); const l = chipList_(); l.splice(i, 1); setChips(l); writeHash(); reload(); $("#q").focus();
+    } }, "×"))));
+  $("#q").placeholder = chipList_().length ? "And…" : (S.aiOn ? "Search anything: flower, red neon, overhead table…" : "Captions, creators, tags, notes");
 }
 function writeHash() {
   const p = new URLSearchParams(S.filter);
@@ -168,7 +267,7 @@ function writeHash() {
 }
 function setFilter(f, keepQuery = true) {
   // switching what you're looking at keeps the search box and the look filters
-  const keep = Object.fromEntries(Object.entries(S.filter).filter(([k]) => LOOK_KEYS.includes(k) || (keepQuery && k === "q")));
+  const keep = Object.fromEntries(Object.entries(S.filter).filter(([k]) => LOOK_KEYS.includes(k) || (keepQuery && (k === "q" || k === "chips"))));
   S.filter = { ...keep, ...f };
   for (const k in S.filter) if (!S.filter[k]) delete S.filter[k];
   writeHash();
@@ -179,11 +278,11 @@ function setFilter(f, keepQuery = true) {
 
 // ---------------- sidebar ----------------
 async function loadSidebar() {
-  api("/api/facets").then((f) => { S.facets = f; renderFilters(); }).catch(() => {});
+  loadFacets();
   if (!S.tech) api("/api/techniques").then((t) => { S.tech = t; renderFilters(); }).catch(() => {});
   api("/api/ai").then((a) => {
     S.aiOn = a.enabled && a.installed;
-    $("#q").placeholder = S.aiOn ? "Search anything: flower, red neon, overhead table…" : "Captions, creators, tags, notes";
+    renderChips();
   }).catch(() => {});
   S.side = await api("/api/sidebar");
   renderSidebar();
@@ -200,6 +299,7 @@ function navItem(label, n, f, extra = {}, cls = "") {
     h("span", { class: "label" }, label), n != null ? h("span", { class: "n" }, pad(n)) : null);
 }
 function renderSidebar() {
+  if (document.activeElement?.classList.contains("side-search")) return;   // don't yank the box away mid-typing
   const sd = S.side; if (!sd) return;
   const c = sd.counts;
   const tagsShown = S.showAllTags ? sd.tags : sd.tags.slice(0, 30);
@@ -226,13 +326,47 @@ function renderSidebar() {
     ...(sd.boards || []).map((b) => h("button", { class: "nav-item board-link", onclick: () => Board.open(b.id) },
       h("span", { class: "label" }, b.name), h("span", { class: "n" }, pad(b.n)))),
     sd.creators.length ? h("h3", {}, "Creators") : null,
-    ...sd.creators.slice(0, S.showAllCreators ? 40 : 8).map((cr) => navItem("@" + cr.name, cr.n, { creator: cr.name }, {}, "handle")),
-    sd.creators.length > 8 ? h("button", { class: "more-link", onclick: () => { S.showAllCreators = !S.showAllCreators; renderSidebar(); } }, S.showAllCreators ? "Fewer" : "More creators") : null,
+    sd.creators.length ? creatorsBlock(sd.creators) : null,
     sd.tags.length ? h("h3", {}, "Tags") : null,
     sd.tags.length ? h("div", { class: "tag-cloud" }, ...tagsShown.map((t) =>
       h("button", { class: S.filter.tag === t.name ? "on" : "", onclick: () => setFilter(S.filter.tag === t.name ? {} : { tag: t.name }) }, t.name))) : null,
     sd.tags.length > 30 ? h("button", { class: "more-link", onclick: () => { S.showAllTags = !S.showAllTags; renderSidebar(); } }, S.showAllTags ? "Fewer tags" : `All ${sd.tags.length} tags`) : null,
   );
+}
+// creators: type a letter or any part of a handle; best matches first (starts with, then contains, then loose)
+function creatorMatches(list, q) {
+  q = q.toLowerCase().replace(/^@/, "").replace(/\s+/g, "");
+  if (!q) return list;
+  const loose = (name) => { let i = 0; for (const ch of name) if (ch === q[i]) i++; return i === q.length; };
+  const tier = (name) => {
+    const n = name.toLowerCase(), plain = n.replace(/[._]/g, "");
+    if (n.startsWith(q) || plain.startsWith(q)) return 0;
+    if (n.split(/[._]/).some((part) => part.startsWith(q))) return 1;
+    if (n.includes(q) || plain.includes(q)) return 2;
+    if (q.length > 2 && loose(plain)) return 3;
+    return 9;
+  };
+  return list.map((c) => [tier(c.name), c]).filter(([t]) => t < 9).sort((a, b) => a[0] - b[0] || b[1].n - a[1].n).map(([, c]) => c);
+}
+function creatorsBlock(all) {
+  const list = h("div", {});
+  const input = h("input", { type: "search", class: "side-search", placeholder: "Find a creator", value: S.creatorQ || "", "aria-label": "Find a creator", autocomplete: "off" });
+  const draw = () => {
+    const q = input.value.trim();
+    const found = creatorMatches(all, q);
+    const shown = q ? found.slice(0, 60) : found.slice(0, S.showAllCreators ? 60 : 8);
+    fill(list, ...shown.map((cr) => navItem("@" + cr.name, cr.n, { creator: cr.name }, {}, "handle")),
+      q && !found.length ? h("div", { class: "side-empty" }, "No creator matches") : null,
+      !q && all.length > 8 ? h("button", { class: "more-link", onclick: () => { S.showAllCreators = !S.showAllCreators; draw(); } }, S.showAllCreators ? "Fewer" : "More creators") : null);
+  };
+  input.addEventListener("input", () => { S.creatorQ = input.value; draw(); });
+  input.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") { const first = creatorMatches(all, input.value.trim())[0]; if (first) setFilter({ creator: first.name }); }
+    if (e.key === "Escape") { input.value = ""; S.creatorQ = ""; draw(); input.blur(); }
+  });
+  draw();
+  return h("div", { class: "creators" }, h("div", { class: "side-search-row" }, input), list);
 }
 async function newCollection() {
   const name = await askText("New collection", { label: "Create" });
@@ -276,8 +410,8 @@ function renderScope() {
   const h1 = h("h1", {}, title);
   if (f.creator || f.tag) h1.style.textTransform = "none";
   const meta = [h("div", { class: "stat" }, h("span", { class: "lbl" }, "Posts"), h("b", {}, S.total != null ? pad(S.total) : "···"))];
-  if (f.q) meta.push(h("div", { class: "stat" }, h("span", { class: "lbl" }, "Search"), h("b", {}, f.q)));
-  if (f.q && S.aiOn) meta.push(h("div", { class: "stat", title: "Looks at every image and about one frame a second of every video, plus captions" }, h("span", { class: "lbl" }, "Matching"), h("b", {}, "what's in the frame + captions")));
+  if (searchActive()) meta.push(h("div", { class: "stat" }, h("span", { class: "lbl" }, "Search"), h("b", {}, searchLabel())));
+  if (searchActive() && S.aiOn) meta.push(h("div", { class: "stat", title: "Looks at every image and about one frame a second of every video, plus captions" }, h("span", { class: "lbl" }, "Matching"), h("b", {}, "what's in the frame + captions")));
   if (f.simimg && S.queryImg) meta.unshift(h("img", { class: "query-img", src: S.queryImg, alt: "Your search image" }));
   if (f.similar || f.simimg) meta.push(h("div", { class: "stat" }, h("span", { class: "lbl" }, "Ranked by"), h("b", {}, "composition + color")));
   meta.push(h("span", { class: "spacer" }));
@@ -316,44 +450,50 @@ function renderFilters() {
   custom.onchange = () => updateFilter({ color: custom.value });
   sw.append(custom);
   if (f.color && !SWATCHES.includes(f.color)) sw.append(h("button", { class: "on", style: `background:${f.color}`, title: "Clear color", onclick: () => updateFilter({ color: null }) }));
+  const menu = (label, key, options, title) => {
+    const m = pick({ label, multi: true, value: f[key] || "", options, title, placeholder: "Any" });
+    m.onchange = () => updateFilter({ [key]: m.value || null });
+    return h("div", { class: "cell menu-cell" }, m);
+  };
+  // techniques: one menu per category, like a shot library; picks in a menu widen, menus narrow each other
+  const tc = fc.tech || {}, techSel = (f.tech || "").split(",").filter(Boolean);
+  const techMenus = (S.tech?.groups || []).map((g) => {
+    const tags = S.tech.tags.filter((t) => t.group === g);
+    const mine = techSel.filter((t) => tags.some((x) => x.tag === t));
+    if (!tags.some((t) => tc[t.tag]) && !mine.length) return null;
+    const m = pick({ label: g, multi: true, value: mine.join(","), placeholder: "Any",
+      title: "Tagged on your Mac. Results start at the moment it shows up.",
+      options: tags.filter((t) => tc[t.tag] || mine.includes(t.tag)).map((t) => ({ value: t.tag, label: t.label, count: tc[t.tag] || 0 })) });
+    m.onchange = () => {
+      const others = techSel.filter((t) => !tags.some((x) => x.tag === t));
+      updateFilter({ tech: [...others, ...m.value.split(",").filter(Boolean)].join(",") || null });
+    };
+    return h("div", { class: "cell menu-cell" }, m);
+  });
   const cc = fc.content || {};
   const ccTotal = Object.values(cc).reduce((a, b) => a + b, 0);
-  const contentSel = ccTotal || f.content ? (() => {
-    const counts = { ...cc, notfilm: ccTotal - (cc.film || 0) };
-    const sel = h("select", { class: f.content ? "on" : "", "aria-label": "Content (AI)" },
-      h("option", { value: "" }, "Content"),
-      ...CONTENT.map(([v, l]) => h("option", { value: v, selected: f.content === v }, `${l}  ${pad(counts[v] || 0)}`)));
-    sel.onchange = () => updateFilter({ content: sel.value || null });
-    return h("label", { class: "cell", title: "What each save shows, tagged by AI on your Mac" }, sel);
-  })() : null;
-  const tc = fc.tech || {};
-  const techSel = S.tech && (Object.keys(tc).length || f.tech) ? (() => {
-    const sel = h("select", { class: f.tech ? "on" : "", "aria-label": "Technique" },
-      h("option", { value: "" }, "Technique"),
-      ...S.tech.groups.map((g) => {
-        const opts = S.tech.tags.filter((t) => t.group === g && (tc[t.tag] || f.tech === t.tag));
-        return opts.length ? h("optgroup", { label: g }, ...opts.map((t) => h("option", { value: t.tag, selected: f.tech === t.tag }, `${t.label}  ${pad(tc[t.tag] || 0)}`))) : null;
-      }));
-    sel.onchange = () => updateFilter({ tech: sel.value || null });
-    return h("label", { class: "cell", title: "Shot type, angle, look and camera movement, tagged on your Mac. Results start at the moment it shows up." }, sel);
-  })() : null;
+  const contentSel = ccTotal || f.content ? menu("Content", "content",
+    CONTENT.map(([v, l]) => ({ value: v, label: l, count: v === "notfilm" ? ccTotal - (cc.film || 0) : cc[v] || 0 })), "What each save shows, tagged by AI on your Mac") : null;
   const selects = Object.entries(LOOK).map(([k, [label, opts]]) => {
-    const counts = fc[k] || {};
-    const sel = h("select", { class: f[k] ? "on" : "", "aria-label": label },
-      h("option", { value: "" }, label),
-      ...opts.filter(([v]) => k !== "ar" || counts[v]).map(([v, l]) => h("option", { value: v, selected: f[k] === v }, `${l}${counts[v] != null ? "  " + pad(counts[v]) : ""}`)));
-    sel.onchange = () => updateFilter({ [k]: sel.value || null });
-    return h("label", { class: "cell" }, sel);
+    const counts = fc[k] || {}, mine = (f[k] || "").split(",");
+    return menu(label, k, opts.filter(([v]) => k !== "ar" || counts[v] || mine.includes(v)).map(([v, l]) => ({ value: v, label: l, count: counts[v] || 0 })));
   });
   const active = LOOK_KEYS.some((k) => f[k]);
   fill($("#filters"),
-    techSel,
+    ...techMenus,
     contentSel,
     h("div", { class: "cell" }, h("span", { class: "lbl" }, "Color"), sw),
     ...selects,
     h("span", { class: "spacer" }),
     fc.pending ? h("span", { class: "analyzing" }, `Analyzing ${fc.pending} images…`) : null,
     active ? h("button", { class: "cell", onclick: () => updateFilter(Object.fromEntries(LOOK_KEYS.map((k) => [k, null]))) }, "Clear filters") : null);
+}
+// counts follow what you've already picked, so every menu only offers what's actually there
+let facetGen = 0;
+async function loadFacets() {
+  const gen = ++facetGen;
+  const p = new URLSearchParams(S.filter);
+  try { const fc = await api("/api/facets?" + p); if (gen === facetGen) { S.facets = fc; renderFilters(); } } catch {}
 }
 async function boardFromCollection() {
   const name = S.filter.collection;
@@ -482,7 +622,7 @@ function tile(p, i, ratio) {
   }
   el.addEventListener("click", (e) => {
     if (e.shiftKey || e.metaKey || e.ctrlKey || S.selected.size) return toggleSelect(p.id, el, e.shiftKey ? i : null);
-    if (S.filter.q && S.aiOn) {
+    if (searchActive() && S.aiOn) {
       S.opened = S.opened || new Set();
       const skipped = S.items.slice(Math.max(0, i - 12), i).filter((x) => !S.opened.has(x.id)).map((x) => x.id);
       S.opened.add(p.id);
@@ -490,7 +630,7 @@ function tile(p, i, ratio) {
     }
     openViewer(i);
   });
-  if (S.filter.q && S.aiOn) {
+  if (searchActive() && S.aiOn) {
     box.append(h("span", { class: "nomatch", role: "button", title: "Not what I searched for: hide it and teach search", onclick: (e) => { e.stopPropagation(); notAMatch(p); } }, "Not a match"));
   }
   el.addEventListener("dragstart", (e) => e.dataTransfer.setData("text/stash-id", p.id));
@@ -534,6 +674,7 @@ async function loadMore() {
 }
 function reload() {
   S.opened = new Set();
+  loadFacets();
   S.gen++; S.items = []; S.offset = 0; S.more = true; S.total = null; S.loading = false;
   layout(true); renderScope(); loadMore();
 }
@@ -557,8 +698,8 @@ function renderEmpty() {
     fill(el, h("h2", {}, "The trash is empty"), h("p", {}, "Posts you move to the trash wait here until you empty it, so nothing is lost by accident."));
   } else {
     fill(el, h("h2", {}, "Nothing here"),
-      h("p", {}, S.filter.q ? "No saves match that search. Try fewer words, or search everything." : "No saves match this view yet."),
-      S.filter.q || Object.keys(S.filter).length ? h("div", { class: "row" }, h("button", { onclick: () => { $("#q").value = ""; setFilter({}, false); } }, "Show everything")) : null);
+      h("p", {}, searchActive() ? "No saves match that search. Try fewer words, or search everything." : "No saves match this view yet."),
+      searchActive() || Object.keys(S.filter).length ? h("div", { class: "row" }, h("button", { onclick: () => { $("#q").value = ""; setFilter({}, false); renderChips(); } }, "Show everything")) : null);
   }
 }
 
@@ -605,9 +746,9 @@ function renderSelbar() {
     toast(`Added ${n} to <b>${esc(v)}</b>`); done();
   };
   input.addEventListener("keydown", (e) => { if (e.key === "Enter") add(); e.stopPropagation(); });
-  const boards = h("select", { "aria-label": "Add to moodboard" },
-    h("option", { value: "" }, "Moodboard…"), h("option", { value: "__new" }, "New moodboard from selection"),
-    ...(S.side?.boards || []).map((b) => h("option", { value: b.id }, b.name)));
+  const boards = pick({ placeholder: "Moodboard…", value: "", cls: "selbar-pick", options: [
+    { value: "__new", label: "New moodboard from selection" },
+    ...(S.side?.boards || []).map((b) => ({ value: String(b.id), label: b.name, group: "Add to" }))] });
   boards.onchange = async () => {
     const v = boards.value; boards.value = "";
     if (v) learnSignal("keep", S.items.filter((x) => S.selected.has(x.id)));
@@ -641,7 +782,7 @@ function renderSelbar() {
 // ---------------- search that learns ----------------
 // what you open, keep and reject after a search teaches it what you meant (stored on this Mac only)
 function learnSignal(signal, posts, extra = {}) {
-  const q = S.filter.q;
+  const q = searchLabel();
   if (!q || !S.aiOn) return;
   const list = (Array.isArray(posts) ? posts : [posts]).filter(Boolean);
   if (!list.length) return;
@@ -679,6 +820,7 @@ function closeViewer() {
 }
 function currentMedia() { return S.post?.media[S.slide]; }
 function renderStage() {
+  V.preview = false;
   const m = currentMedia();
   const frame = $("#frame");
   V.video = null;
@@ -713,6 +855,13 @@ function updateDeck() {
   $("#tc").textContent = fmtTime(v.currentTime);
   $("#play").textContent = v.paused ? "Play" : "Pause";
   $("#mute").textContent = v.muted ? "Unmute" : "Mute";
+  if (V.preview && !v.paused) {
+    const a = S.inPt ?? 0, b = S.outPt ?? v.duration;
+    if (v.currentTime >= b - 0.03 || v.currentTime < a - 0.1) v.currentTime = a;
+  }
+  const pv = $("#preview");
+  pv.disabled = S.inPt == null && S.outPt == null; pv.textContent = V.preview ? "Stop preview" : "Preview";
+  pv.classList.toggle("on", !!V.preview);
   const mi = $("#markIn"), mo = $("#markOut"), r = $("#range");
   mi.classList.toggle("on", S.inPt != null); mo.classList.toggle("on", S.outPt != null);
   if (S.inPt != null) mi.style.left = pct(S.inPt);
@@ -736,6 +885,16 @@ function togglePlay() { const v = V.video; if (!v) return; v.paused ? v.play() :
 function step(dir) { const v = V.video; if (!v) return; v.pause(); v.currentTime = Math.max(0, Math.min(v.duration, v.currentTime + dir / 30)); }
 function setIn() { if (!V.video) return; S.inPt = V.video.currentTime; if (S.outPt != null && S.outPt <= S.inPt) S.outPt = null; updateDeck(); }
 function setOut() { if (!V.video) return; S.outPt = V.video.currentTime; if (S.inPt != null && S.inPt >= S.outPt) S.inPt = null; updateDeck(); }
+// the buttons: click to set, click again to clear
+function toggleIn() { if (S.inPt != null) { S.inPt = null; V.preview = false; updateDeck(); } else setIn(); }
+function toggleOut() { if (S.outPt != null) { S.outPt = null; V.preview = false; updateDeck(); } else setOut(); }
+// play just the marked section, on a loop
+function togglePreview() {
+  const v = V.video; if (!v || (S.inPt == null && S.outPt == null)) return;
+  V.preview = !V.preview;
+  if (V.preview) { v.currentTime = S.inPt ?? 0; v.play().catch(() => {}); }
+  updateDeck();
+}
 (() => {
   const scrub = $("#scrub");
   const seek = (e) => {
@@ -749,8 +908,17 @@ function setOut() { if (!V.video) return; S.outPt = V.video.currentTime; if (S.i
 $("#play").onclick = togglePlay;
 $("#stepBack").onclick = () => step(-1);
 $("#stepFwd").onclick = () => step(1);
-$("#setIn").onclick = setIn;
-$("#setOut").onclick = setOut;
+$("#setIn").onclick = toggleIn;
+$("#setOut").onclick = toggleOut;
+$("#preview").onclick = togglePreview;
+(function previewTick() {   // keep the preview tight to the marks (timeupdate alone overshoots)
+  const v = V.video;
+  if (V.preview && v && !v.paused) {
+    const a = S.inPt ?? 0, b = S.outPt ?? v.duration;
+    if (v.currentTime >= b - 0.02 || v.currentTime < a - 0.1) v.currentTime = a;
+  }
+  requestAnimationFrame(previewTick);
+})();
 $("#grab").onclick = grabFrame;
 
 async function downloadUrl(url) {
@@ -820,8 +988,8 @@ function renderInfo() {
         p.media.length > 1 ? h("button", { onclick: () => downloadUrl(`/api/posts/${p.id}/zip`) }, `All ${p.media.length} as zip`) : null)));
   }
   if (isVideo) {
-    const fmt = h("select", {}, ...[480, 640, 960, 1280].map((w) => h("option", { value: w, selected: w === 640 }, w + " wide")));
-    const fps = h("select", {}, ...[12, 15, 24].map((f) => h("option", { value: f, selected: f === 15 }, f + " fps")));
+    const fmt = pick({ value: "640", options: [480, 640, 960, 1280].map((w) => ({ value: String(w), label: w + " wide" })) });
+    const fps = pick({ value: "15", options: [12, 15, 24].map((f) => ({ value: String(f), label: f + " fps" })) });
     const range = () => ({ start: S.inPt ?? 0, end: S.outPt ?? (V.video?.duration || m.duration) });
     sections.push(h("section", {},
       h("h4", {}, "Clip", h("span", { class: "tc", id: "clipRange" })),
@@ -847,12 +1015,19 @@ function renderInfo() {
       ...spec("Saved", fmtDay(p.saved_at)),
       ...spec("Posted", fmtDay(p.posted_at)),
       ...spec("Format", m ? `${m.kind === "video" ? "Video" : "Image"} ${m.width || "?"}×${m.height || "?"}${isVideo ? " " + fmtTime(m.duration) : ""}`.toUpperCase() : "Not downloaded"),
+      ...(isVideo ? spec("Quality", (() => {
+        const mbps = m.bitrate ? (m.bitrate / 1e6).toFixed(1) + " Mbps" : "";
+        const state = m.hq === 1 ? "Best available" : m.hq === -1 ? "Best Instagram has" : "Checking for a sharper copy";
+        const btn = h("button", { class: "link", style: "border:0;background:none;padding:0;font:inherit;text-decoration:underline;cursor:pointer;color:inherit",
+          title: "Fetch this video from Instagram again and keep whichever copy is sharper",
+          onclick: async () => { await api(`/api/posts/${p.id}/redownload`, { method: "POST" }); toast("Re-downloading at the best quality Instagram has. It swaps in when it's done."); } }, "Re-download");
+        return h("span", {}, [mbps, state].filter(Boolean).join(" / ").toUpperCase(), " / ", btn);
+      })()) : []),
       ...(p.media.length > 1 ? spec("Item", `${pad(S.slide + 1, 2)} / ${pad(p.media.length, 2)}`) : []),
       ...spec("Source", h("a", { href: p.url, onclick: (e) => { e.preventDefault(); openExternal(p.url); } }, "Instagram ↗")),
       ...(m && m.content !== undefined && (m.content || S.aiOn) ? spec("Content", (() => {
-        const sel = h("select", { style: "font:inherit;text-transform:uppercase;border:0;padding:0", title: m.content_fixed ? "Set by you" : "Tagged by AI. Change it if it's wrong." },
-          ...(m.content ? [] : [h("option", { value: "" }, "Not tagged yet")]),
-          ...CONTENT.filter(([v]) => v !== "notfilm").map(([v, l]) => h("option", { value: v, selected: m.content === v }, l + (m.content === v && !m.content_fixed ? " (AI)" : ""))));
+        const sel = pick({ plain: true, value: m.content || "", placeholder: "Not tagged yet", title: m.content_fixed ? "Set by you" : "Tagged by AI. Change it if it's wrong.",
+          options: CONTENT.filter(([v]) => v !== "notfilm").map(([v, l]) => ({ value: v, label: l + (m.content === v && !m.content_fixed ? " (AI)" : "") })) });
         sel.onchange = async () => { await api(`/api/media/${m.id}/content`, { method: "POST", body: { content: sel.value } }); toast("Label updated"); S.post = await api(`/api/posts/${p.id}`); renderInfo(); };
         return sel;
       })()) : []),
@@ -872,8 +1047,8 @@ function renderInfo() {
     cap, capMore,
     ...sections,
     m && (S.aiOn || m.techniques?.length) ? techSection(p, m) : null,
-    S.filter.q && S.aiOn && S.items[S.viewerIndex]?.id === p.id ? h("div", { class: "cells" },
-      h("button", { onclick: () => { const it = S.items[S.viewerIndex]; closeViewer(); notAMatch(it); } }, `Not a match for “${S.filter.q}”`)) : null,
+    searchActive() && S.aiOn && S.items[S.viewerIndex]?.id === p.id ? h("div", { class: "cells" },
+      h("button", { onclick: () => { const it = S.items[S.viewerIndex]; closeViewer(); notAMatch(it); } }, `Not a match for “${searchLabel()}”`)) : null,
     h("section", {}, h("h4", {}, "Collections"), chipList(p.collections, "col"), adder("Add to collection", "col")),
     h("section", {}, h("h4", {}, "Tags"), chipList(p.tags || [], "tag"), adder("Add tags, comma separated", "tag")),
     h("section", {}, h("h4", {}, "Notes"), notes),
@@ -900,9 +1075,9 @@ function techSection(p, m) {
     toast(on ? "Added. Shots that look like this one will pick it up too." : "Removed. Stash won't tag this one again, and leans away from it for look-alikes.");
     refresh();
   };
-  const add = h("select", { "aria-label": "Add a technique" }, h("option", { value: "" }, "+ Add technique"),
-    ...(S.tech?.groups || []).map((g) => h("optgroup", { label: g },
-      ...S.tech.tags.filter((t) => t.group === g && !tags.some((x) => x.tag === t.tag)).map((t) => h("option", { value: t.tag }, t.label)))));
+  const add = pick({ placeholder: "+ Add technique", value: "", cls: "boxed",
+    options: (S.tech?.tags || []).filter((t) => !tags.some((x) => x.tag === t.tag)).map((t) => ({ value: t.tag, label: t.label, group: t.group })) });
+  add.setAttribute("aria-label", "Add a technique");
   add.onchange = () => { if (add.value) set(add.value, true); };
   const how = { ai: "Tagged by AI", motion: "Measured from the camera movement", learned: "Learned from shots you tagged", user: "Added by you" };
   return h("section", {}, h("h4", {}, "Technique"),
@@ -956,23 +1131,46 @@ function renderDrawer(focus) {
   } }, "Check for updates");
   statusSec.append(verLine, h("div", { class: "row" }, verBtn));
   if (!UPD) checkUpdate().then((u) => { if (u) verLine.textContent = "Stash " + u.current; });
+  if (s._signed_in === false) statusSec.append(h("p", { style: "color:var(--danger)" },
+    "Instagram isn't seeing you as signed in, so it's handing out smaller, softer videos. Open instagram.com in the browser chosen below, make sure you're logged in, and if your Mac asks about “Chrome Safe Storage”, choose Always Allow."));
   if (!s._gallery_dl) statusSec.append(h("p", { style: "color:var(--danger)" }, "The sync engine is missing from this copy of Stash. Download the latest version and replace the app."));
 
   // --- import
   const fileInput = h("input", { type: "file", accept: ".zip,.json", multiple: true, hidden: true });
   const drop = h("div", { class: "drop", tabindex: "0", onclick: () => fileInput.click() }, "Drop the export .zip here, or click to choose it");
   const doImport = async (files) => {
-    const fd = new FormData();
-    for (const f of files) fd.append("file", f);
+    files = [...files];
+    const form = (extra) => { const fd = new FormData(); for (const f of files) fd.append("file", f); for (const [k, v] of Object.entries(extra)) fd.append(k, v); return fd; };
     drop.textContent = "Reading export…";
-    try {
-      const r = await api("/api/import", { method: "POST", body: fd });
-      drop.textContent = `Added ${r.new_posts.toLocaleString()} saves from ${r.collections.length} collections` +
-        (r.skipped_uncollected ? `, skipped ${r.skipped_uncollected.toLocaleString()} that aren't in a collection` : "") +
-        (r.dated ? `. Real save dates applied to ${r.dated.toLocaleString()} posts.` : ".");
-      toast(`Imported ${r.new_posts.toLocaleString()} saves. Run Sync now to download their media.`);
-      loadSidebar(); reload();
-    } catch (e) { drop.textContent = e.message; }
+    let pv;
+    try { pv = await api("/api/import", { method: "POST", body: form({ preview: "1" }) }); }
+    catch (e) { drop.textContent = e.message; return; }
+    drop.textContent = "Drop the export .zip here, or click to choose it";
+    // pick which collections come in: nothing is ticked until you choose
+    const boxes = pv.collections.map((c) => { const i = h("input", { type: "checkbox", value: c.name }); return [i, h("label", { class: "check" }, i, `${c.name}  `, h("span", { class: "hint", style: "display:inline" }, pad(c.count)))]; });
+    const unc = h("input", { type: "checkbox" });
+    const go = h("button", { class: "primary", disabled: true }, "Import");
+    const sync_ = () => { go.disabled = !boxes.some(([i]) => i.checked) && !unc.checked; };
+    boxes.forEach(([i]) => { i.onchange = sync_; }); unc.onchange = sync_;
+    const close = modal({
+      title: "Which collections should come in?",
+      text: `This export has ${pv.posts_found.toLocaleString()} saves. Only the collections you tick are added. Nothing else in the export is touched.`,
+      body: h("div", { class: "pick-cols" }, ...boxes.map(([, l]) => l),
+        pv.uncollected ? h("label", { class: "check", style: "margin-top:10px" }, unc, `Saves that aren't in any collection  `, h("span", { class: "hint", style: "display:inline" }, pad(pv.uncollected))) : null),
+      actions: [{ label: "Cancel", fn: (c) => c() }],
+    });
+    $(".modal .row").append(go);
+    go.onclick = async () => {
+      const picked = boxes.filter(([i]) => i.checked).map(([i]) => i.value);
+      close(); drop.textContent = "Importing…";
+      try {
+        const r = await api("/api/import", { method: "POST", body: form({ collections: JSON.stringify(picked), uncollected: unc.checked ? "1" : "0" }) });
+        drop.textContent = `Added ${r.new_posts.toLocaleString()} saves from ${picked.length ? picked.join(", ") : "your uncollected saves"}` +
+          (r.dated ? `. Real save dates applied to ${r.dated.toLocaleString()} posts.` : ".");
+        toast(`Imported ${r.new_posts.toLocaleString()} saves. Run Sync now to download their media.`);
+        loadSidebar(); reload();
+      } catch (e) { drop.textContent = e.message; }
+    };
   };
   fileInput.onchange = () => doImport(fileInput.files);
   drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
@@ -993,8 +1191,8 @@ function renderDrawer(focus) {
 
   // --- account + collections
   const user = h("input", { value: s.instagram_username || "", placeholder: "yourhandle" });
-  const browser = h("select", {}, ...["chrome", "safari", "firefox", "brave", "edge", "vivaldi", "zen", "file"].map((b) =>
-    h("option", { value: b, selected: s.cookies_source === b }, b === "file" ? "A cookies.txt file" : b[0].toUpperCase() + b.slice(1))));
+  const browser = pick({ cls: "boxed", value: s.cookies_source || "chrome", options: ["chrome", "safari", "firefox", "brave", "edge", "vivaldi", "zen", "file"].map((b) =>
+    ({ value: b, label: b === "file" ? "A cookies.txt file" : b[0].toUpperCase() + b.slice(1) })) });
   const cfile = h("input", { value: s.cookies_file || "", placeholder: "/path/to/cookies.txt" });
   const cfileField = h("label", { class: "field", hidden: s.cookies_source !== "file" }, "cookies.txt path", cfile);
   browser.onchange = () => { cfileField.hidden = browser.value !== "file"; };
@@ -1014,8 +1212,8 @@ function renderDrawer(focus) {
   };
   (s.collections || []).forEach(addColRow);
   if (!colRows.length) addColRow();
-  const auto = h("select", {}, ...[[0, "Off"], [3, "Every 3 hours"], [6, "Every 6 hours"], [12, "Twice a day"], [24, "Once a day"]].map(([v, l]) =>
-    h("option", { value: v, selected: Number(s.auto_sync_hours) === v }, l)));
+  const auto = pick({ cls: "boxed", value: String(Number(s.auto_sync_hours) || 0), options: [[0, "Off"], [3, "Every 3 hours"], [6, "Every 6 hours"], [12, "Twice a day"], [24, "Once a day"]].map(([v, l]) =>
+    ({ value: String(v), label: l })) });
   const perRun = h("input", { value: s.backfill_per_run, inputmode: "numeric" });
   const d0 = h("input", { value: s.request_delay?.[0] ?? 6, inputmode: "numeric" });
   const d1 = h("input", { value: s.request_delay?.[1] ?? 12, inputmode: "numeric" });
@@ -1190,6 +1388,16 @@ async function pollJobs(now) {
 
 // ---------------- global wiring ----------------
 let qTimer;
+$("#q").addEventListener("keydown", (e) => {
+  const v = $("#q").value.trim();
+  if (e.key === "Enter" && v) {   // lock this term in as a chip and start the next one
+    e.preventDefault(); clearTimeout(qTimer);
+    const l = chipList_(); if (!l.some((x) => x.toLowerCase() === v.toLowerCase())) l.push(v);
+    setChips(l); delete S.filter.q; $("#q").value = ""; writeHash(); reload();
+  } else if (e.key === "Backspace" && !$("#q").value && chipList_().length) {
+    e.preventDefault(); const l = chipList_(); l.pop(); setChips(l); writeHash(); reload();
+  }
+});
 $("#q").addEventListener("input", () => {
   clearTimeout(qTimer);
   qTimer = setTimeout(() => { S.filter.q = $("#q").value.trim(); if (!S.filter.q) delete S.filter.q; writeHash(); reload(); }, 220);
@@ -1212,7 +1420,7 @@ document.addEventListener("keydown", (e) => {
       escape: closeViewer,
       arrowright: () => { if (S.viewerIndex < S.items.length - 1) openViewer(S.viewerIndex + 1); },
       arrowleft: () => { if (S.viewerIndex > 0) openViewer(S.viewerIndex - 1); },
-      " ": togglePlay, i: setIn, o: setOut, g: grabFrame, m: toggleMute,
+      " ": togglePlay, i: setIn, o: setOut, p: togglePreview, g: grabFrame, m: toggleMute,
       ",": () => step(-1), ".": () => step(1),
       f: () => S.post && $(".fav-btn")?.click(),
       arrowdown: () => { if (multi) { S.slide = (S.slide + 1) % S.post.media.length; renderStage(); renderInfo(); } },

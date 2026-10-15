@@ -327,6 +327,7 @@ DEFAULT_SETTINGS = {
     "media_dir": "",                     # where originals live; empty = inside the library folder
     "media_move_from": "",               # a move in progress (resumes if the app was closed)
     "media_move_to": "",
+    "quality_check": 0,                  # 1 = every video was re-checked for a sharper version once
 }
 
 

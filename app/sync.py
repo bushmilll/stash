@@ -107,6 +107,15 @@ def _scheduler():
             traceback.print_exc()
         try:
             s = db.load_settings()
+            if s.get("collections") or s.get("instagram_username"):
+                busy = db.conn().execute("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0]
+                lu = db.conn().execute("SELECT COALESCE(finished, started), status FROM jobs WHERE kind='upgrade' ORDER BY id DESC LIMIT 1").fetchone()
+                last_up = (lu[0] or 0) + (2 * 3600 if lu and lu[1] == "error" else 0) if lu else 0   # back off after a failed run
+                todo = db.conn().execute(
+                    "SELECT COUNT(*) FROM media m JOIN posts p ON p.id=m.post_id WHERE m.kind='video' AND COALESCE(m.hq,0)=0 "
+                    "AND p.status='ready' AND p.deleted_at IS NULL").fetchone()[0]
+                if todo and not busy and time.time() - last_up > 15 * 60:
+                    enqueue("upgrade")    # sharpen older videos in the background, a batch at a time
             hours = float(s.get("auto_sync_hours") or 0)
             if hours <= 0 or not (s.get("collections") or s.get("instagram_username")):
                 continue
@@ -122,6 +131,12 @@ def _scheduler():
 
 
 def start():
+    s0 = db.load_settings()
+    if int(s0.get("quality_check") or 0) < 1:
+        # earlier versions sometimes kept Instagram's small copy and called it the best: check every video again
+        with db.tx() as c:
+            c.execute("UPDATE media SET hq=0 WHERE kind='video'")
+        db.save_settings({"quality_check": 1})
     # anything left "running" from a previous launch didn't finish
     with db.tx() as c:
         c.execute("UPDATE jobs SET status='cancelled', message='Interrupted (app closed)' "
@@ -271,6 +286,43 @@ def _download_dash(manifest, dest, headers=None):
     return v
 
 
+def _quality(path):
+    """(pixels, bitrate) of a video file, for comparing two versions of the same video."""
+    try:
+        w, h, d = media.probe(path)
+        return (w or 0) * (h or 0), (path.stat().st_size * 8 / d) if d else 0
+    except Exception:
+        return 0, 0
+
+
+def _keep_better(new, dest):
+    """Replace dest with new only if new is sharper (more pixels, or same size at a clearly higher bitrate)."""
+    if not dest.exists():
+        new.replace(dest)
+        return True
+    (np_, nb), (op, ob) = _quality(new), _quality(dest)
+    if np_ > op * 1.02 or (np_ >= op * 0.98 and nb > ob * 1.1):
+        new.replace(dest)
+        return True
+    new.unlink(missing_ok=True)
+    return False
+
+
+def _full_size(path, f):
+    """True if a single-file video is as large as the original Instagram reports (else a smaller copy was served)."""
+    ow, oh = int(f.get("width_original") or 0), int(f.get("height_original") or 0)
+    if not ow or not oh:
+        return True
+    try:
+        w, h, _ = media.probe(path)
+    except Exception:
+        return False
+    return (w or 0) * (h or 0) >= 0.9 * ow * oh
+
+
+SIGNIN = {"ok": None, "at": 0}
+
+
 def _save_post(post, files, collection=None, upgrade=False, saved_at=None):
     """post: gallery-dl metadata dict; files: [(url, filedict)]. Downloads media and records the post."""
     code = post.get("post_shortcode") or post.get("shortcode")
@@ -294,8 +346,9 @@ def _save_post(post, files, collection=None, upgrade=False, saved_at=None):
             if dest.exists() and not upgrade:
                 saved.append(dest); best.add(i)
                 continue
+            target = dest.with_name(dest.stem + ".new.mp4") if dest.exists() else dest
             try:
-                _download_dash(f["_ytdl_manifest_data"], dest, headers)
+                _download_dash(f["_ytdl_manifest_data"], target, headers)
                 best.add(i)
             except (Cancelled, StopSync):
                 raise
@@ -303,22 +356,30 @@ def _save_post(post, files, collection=None, upgrade=False, saved_at=None):
                 print(f"[stash] best-quality download failed for {code} #{i + 1}, using the standard file: {e}", flush=True)
                 fb = f.get("_fallback") or ()
                 if not fb:
+                    if dest.exists():
+                        saved.append(dest)
                     continue
                 tmp = dest.with_name(dest.stem + ".fb.mp4")
                 _download(fb[0], tmp, headers)
-                tmp.replace(dest)
+                tmp.replace(target)
+            if target != dest:
+                _keep_better(target, dest)   # never swap a video for a worse copy
             saved.append(dest)
             continue
         ext = (f.get("extension") or "jpg").lower()
         dest = folder / f"{i + 1:02d}.{ext}"
-        if is_video and upgrade and dest.exists():
+        if is_video and dest.exists() and upgrade:
             tmp = dest.with_name(dest.stem + ".new." + ext)
             _download(url, tmp, headers)
-            tmp.replace(dest)
+            if _full_size(tmp, f):
+                best.add(i)
+            _keep_better(tmp, dest)
         elif not dest.exists():
             _download(url, dest, headers)
-        if is_video:
-            best.add(i)   # no DASH offered: the single file is the best Instagram has
+            if is_video and _full_size(dest, f):
+                best.add(i)   # no DASH offered, but this file is full size: the best Instagram has
+        elif is_video:
+            best.add(i)
         saved.append(dest)
 
     date = post.get("post_date") or post.get("date")
@@ -356,7 +417,14 @@ def _iter_posts(url):
     if ex is None:
         raise StopSync(f"That doesn't look like an Instagram saved/collection URL: {url}")
     post, files = None, []
+    checked = False
     for msg in ex:
+        if not checked:
+            checked = True
+            try:   # without a signed-in session Instagram only hands out smaller videos
+                SIGNIN.update(ok=any(c.name == "sessionid" and "instagram" in (c.domain or "") for c in ex.cookies), at=time.time())
+            except Exception:
+                pass
         if msg[0] == Message.Directory:
             if post is not None:
                 yield post, files
@@ -448,19 +516,33 @@ def run_sync(jid):
     return msg
 
 
+_wanted = []    # posts you asked to re-download now: they jump the queue
+
+
+def upgrade_posts(post_ids):
+    """Re-download these posts' videos now, keeping whichever version is sharper."""
+    for i in post_ids[:50]:
+        if int(i) not in _wanted:
+            _wanted.append(int(i))
+    return enqueue("upgrade")
+
+
 def run_upgrade(jid):
     """Re-download videos that were saved before Stash grabbed the best-quality streams."""
     s = db.load_settings()
     _configure(s)
     limit = int(s.get("backfill_per_run") or 150)
-    rows = db.conn().execute(
-        "SELECT DISTINCT p.id, p.shortcode FROM posts p JOIN media m ON m.post_id=p.id "
-        "WHERE m.kind='video' AND COALESCE(m.hq,0)=0 AND p.status='ready' AND p.deleted_at IS NULL "
-        "ORDER BY COALESCE(p.saved_at,p.added_at) DESC LIMIT ?", (limit,)).fetchall()
+    rows = list(db.conn().execute(
+            "SELECT DISTINCT p.id, p.shortcode FROM posts p JOIN media m ON m.post_id=p.id "
+            "WHERE m.kind='video' AND COALESCE(m.hq,0)=0 AND p.status='ready' AND p.deleted_at IS NULL "
+            "ORDER BY COALESCE(p.saved_at,p.added_at) DESC LIMIT ?", (limit,)).fetchall())
+    asked = [r for r in (db.conn().execute("SELECT id, shortcode FROM posts WHERE id=?", (pid,)).fetchone() for pid in list(_wanted)) if r]
+    _wanted.clear()
+    rows = asked + [r for r in rows if r["id"] not in {a["id"] for a in asked}]
     if not rows:
         return "All videos are already in the best quality Instagram offers"
     delay = s.get("request_delay") or [6, 12]
-    ok = failed = 0
+    ok = failed = misses = 0
     for i, r in enumerate(rows):
         _check_cancel()
         _update(jid, done=i, total=len(rows), message=f"Upgrading video {i + 1} of {len(rows)}")
@@ -468,6 +550,7 @@ def run_upgrade(jid):
             for post, files in _iter_posts(f"https://www.instagram.com/p/{r['shortcode']}/"):
                 _save_post(post, files, upgrade=True)
             ok += 1
+            misses = 0
         except (Cancelled, StopSync):
             raise
         except Exception as e:
@@ -475,8 +558,15 @@ def run_upgrade(jid):
             if _blocking(msg):
                 raise StopSync(msg)
             failed += 1
-            with db.tx() as c:   # don't keep retrying a post that's gone or broken
-                c.execute("UPDATE media SET hq=-1 WHERE post_id=? AND kind='video'", (r["id"],))
+            low = msg.lower()
+            if any(k in low for k in ("404", "not found", "unavailable", "deleted", "private", "no longer")):
+                with db.tx() as c:   # the post is gone: don't keep retrying it
+                    c.execute("UPDATE media SET hq=-1 WHERE post_id=? AND kind='video'", (r["id"],))
+                misses = 0
+            else:   # couldn't reach Instagram: leave it for next time, and stop if it keeps happening
+                misses += 1
+                if misses >= 3:
+                    raise StopSync("Couldn't reach Instagram to upgrade videos, will try again later (" + msg[:160] + ")")
         for _ in range(int(random.uniform(float(delay[0]), float(delay[1])) * 2)):
             _check_cancel()
             time.sleep(0.5)

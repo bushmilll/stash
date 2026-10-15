@@ -377,8 +377,9 @@ const Board = (() => {
           btn("− Frame", "Back a frame (,)", () => { v.pause(); v.currentTime = Math.max(0, v.currentTime - 1 / 30); }),
           btn("+ Frame", "Forward a frame (.)", () => { v.pause(); v.currentTime = Math.min(v.duration, v.currentTime + 1 / 30); }),
           h("span", { class: "spacer" }),
-          btn("In", "Loop starts here (I)", clipIn, "clipIn"),
-          btn("Out", "Loop ends here (O)", clipOut, "clipOut"),
+          btn("In", "Loop starts here (I). Click again to clear", () => clipIn(true), "clipIn"),
+          btn("Out", "Loop ends here (O). Click again to clear", () => clipOut(true), "clipOut"),
+          btn("Preview", "Play just the loop (P)", clipPreview, "clipPreview"),
           btn("No loop", "Stop looping this tile", clipClear, "clipClear"),
           btn("Use as still", "Show this frame on the board and in PNG / PDF exports (S)", clipStill, "clipStillBtn")),
         h("p", { class: "clip-hint" }, "Set In and Out to loop that section on the board and in video exports. The still is what static exports show.")));
@@ -395,6 +396,8 @@ const Board = (() => {
     $("#clipIn").textContent = "In " + fmt(it.vin);
     $("#clipOut").textContent = "Out " + (it.vin != null ? fmt(it.vout ?? v.duration) : "–");
     $("#clipClear").disabled = it.vin == null;
+    $("#clipPreview").disabled = it.vin == null;
+    $("#clipPreview").textContent = clip.preview && !v.paused ? "Stop preview" : "Preview";
     $("#clipStillBtn").textContent = "Use as still" + (it.still != null ? " (" + fmt(it.still) + ")" : "");
     const scrub = $("#clipPanel input[type=range]"); if (scrub && document.activeElement !== scrub) scrub.value = v.currentTime;
     const r = $("#clipLoop");
@@ -404,21 +407,29 @@ const Board = (() => {
     s.style.display = it.still != null ? "block" : "none";
     if (it.still != null) s.style.left = pct(it.still);
   }
-  function clipIn() {
+  function clipIn(fromButton) {
     if (!clip) return;
     const { it, video: v } = clip;
+    if (fromButton === true && it.vin != null) { it.vin = it.vout = null; clip.preview = false; render(); clipUpdate(); save(); return; }   // click again: clear
     it.vin = Math.round(v.currentTime * 100) / 100;
     if (it.vout != null && it.vout <= it.vin + 0.1) it.vout = null;
     render(); clipUpdate(); save();
   }
-  function clipOut() {
+  function clipOut(fromButton) {
     if (!clip) return;
     const { it, video: v } = clip;
+    if (fromButton === true && it.vout != null) { it.vout = null; render(); clipUpdate(); save(); return; }   // click again: back to the end
     const t = Math.round(v.currentTime * 100) / 100;
     if (it.vin == null) it.vin = 0;
     if (t <= it.vin + 0.1) return toast("Out has to come after In", { error: true });
     it.vout = t;
     render(); clipUpdate(); save();
+  }
+  function clipPreview() {
+    if (!clip || clip.it.vin == null) return;
+    clip.preview = !clip.preview;
+    if (clip.preview) { clip.video.currentTime = clip.it.vin; clip.video.play().catch(() => {}); } else clip.video.pause();
+    clipUpdate();
   }
   function clipClear() { if (!clip) return; clip.it.vin = clip.it.vout = null; render(); clipUpdate(); save(); }
   function clipStill() {
@@ -763,7 +774,7 @@ const Board = (() => {
       }
       if (clip) {   // the selected video tile's panel
         const v = clip.video;
-        const keys = { i: clipIn, o: clipOut, s: clipStill, " ": () => (v.paused ? v.play() : v.pause()),
+        const keys = { i: clipIn, o: clipOut, s: clipStill, p: clipPreview, " ": () => (v.paused ? v.play() : v.pause()),
           ",": () => { v.pause(); v.currentTime = Math.max(0, v.currentTime - 1 / 30); },
           ".": () => { v.pause(); v.currentTime = Math.min(v.duration, v.currentTime + 1 / 30); } };
         if (keys[k]) { e.preventDefault(); keys[k](); return; }

@@ -11,6 +11,7 @@
 
 Stored in `techniques` (media_id, tag, score, t, source). source: ai / motion / learned / user / no.
 """
+import json
 import subprocess
 import threading
 import time
@@ -20,45 +21,61 @@ import numpy as np
 
 from . import db
 
-TECH_VERSION = 3
+TECH_VERSION = 4
 
-# key: (label, group)
+# key: (label, group). Frame Size, Shot Type and Composition use ShotDeck's names.
 TAGS = {
-    "closeup": ("Close-up", "Framing"), "wide": ("Wide shot", "Framing"), "two_shot": ("Two shot", "Framing"),
-    "ots": ("Over the shoulder", "Framing"), "profile": ("Profile", "Framing"), "central": ("Central framing", "Framing"),
-    "high_angle": ("High angle", "Angle"), "low_angle": ("Low angle", "Angle"), "overhead": ("Overhead", "Angle"),
-    "worms_eye": ("Worm's-eye", "Angle"), "dutch": ("Dutch angle", "Angle"), "ground": ("Ground level", "Angle"),
-    "silhouette": ("Silhouette", "Look"), "shallow": ("Shallow focus", "Look"), "fisheye": ("Fisheye", "Look"),
-    "ultra_wide": ("Ultra wide", "Look"), "aerial": ("Aerial", "Look"), "underwater": ("Underwater", "Look"),
-    "haze": ("Haze", "Look"), "hard_light": ("Hard light", "Look"), "halation": ("Halation", "Look"),
-    "reflections": ("Reflections", "Look"), "spotlight": ("Spotlight", "Look"), "night_vision": ("Night vision", "Look"),
-    "thermal": ("Thermal", "Look"), "motion_blur": ("Motion blur", "Look"), "double_exposure": ("Double exposure", "Look"),
-    "split_screen": ("Split screen", "Look"), "typography": ("Typography", "Look"), "tilt_shift": ("Tilt shift", "Look"),
-    "vintage": ("Vintage", "Look"),
+    "ews": ("Extreme Wide", "Frame Size"), "ws": ("Wide", "Frame Size"), "mws": ("Medium Wide", "Frame Size"),
+    "ms": ("Medium", "Frame Size"), "mcu": ("Medium Close Up", "Frame Size"), "cu": ("Close Up", "Frame Size"),
+    "ecu": ("Extreme Close Up", "Frame Size"),
+    "aerial": ("Aerial", "Shot Type"), "overhead": ("Overhead", "Shot Type"), "high_angle": ("High angle", "Shot Type"),
+    "low_angle": ("Low angle", "Shot Type"), "dutch": ("Dutch angle", "Shot Type"), "establishing": ("Establishing shot", "Shot Type"),
+    "ots": ("Over the shoulder", "Shot Type"), "single": ("Clean single", "Shot Type"), "two_shot": ("2 shot", "Shot Type"),
+    "three_shot": ("3 shot", "Shot Type"), "group": ("Group shot", "Shot Type"), "insert": ("Insert", "Shot Type"),
+    "center": ("Center", "Composition"), "left_heavy": ("Left heavy", "Composition"), "right_heavy": ("Right heavy", "Composition"),
+    "balanced": ("Balanced", "Composition"), "symmetrical": ("Symmetrical", "Composition"), "short_side": ("Short side", "Composition"),
     "locked": ("Locked-off", "Movement"), "pan": ("Pan", "Movement"), "tilt": ("Tilt", "Movement"),
     "zoom": ("Zoom / push", "Movement"), "whip": ("Whip pan", "Movement"), "handheld": ("Handheld", "Movement"),
+    "silhouette": ("Silhouette", "Look"), "shallow": ("Shallow focus", "Look"), "fisheye": ("Fisheye", "Look"),
+    "ultra_wide": ("Ultra wide", "Look"), "underwater": ("Underwater", "Look"), "haze": ("Haze", "Look"),
+    "hard_light": ("Hard light", "Look"), "halation": ("Halation", "Look"), "reflections": ("Reflections", "Look"),
+    "spotlight": ("Spotlight", "Look"), "night_vision": ("Night vision", "Look"), "thermal": ("Thermal", "Look"),
+    "motion_blur": ("Motion blur", "Look"), "double_exposure": ("Double exposure", "Look"),
+    "split_screen": ("Split screen", "Look"), "typography": ("Typography", "Look"), "tilt_shift": ("Tilt shift", "Look"),
+    "vintage": ("Vintage", "Look"),
 }
-GROUPS = ["Framing", "Angle", "Look", "Movement"]
+GROUPS = ["Frame Size", "Shot Type", "Composition", "Movement", "Look"]
+# tags from earlier versions -> today's names (your own tags carry over)
+RENAMED = {"closeup": "cu", "wide": "ws", "two_shot": "two_shot", "central": "center"}
 
 # words people type that mean a tag (search "whip pan" -> whip)
 SYNONYMS = {
-    "close up": "closeup", "closeup": "closeup", "close-up": "closeup", "cu": "closeup", "ecu": "closeup",
-    "wide": "wide", "wide shot": "wide", "establishing shot": "wide", "ws": "wide",
-    "two shot": "two_shot", "2 shot": "two_shot", "over the shoulder": "ots", "ots": "ots", "profile": "profile",
-    "symmetry": "central", "symmetrical": "central", "central framing": "central",
-    "high angle": "high_angle", "low angle": "low_angle", "overhead": "overhead", "top down": "overhead",
-    "birds eye": "overhead", "bird's eye": "overhead", "worms eye": "worms_eye", "worm's eye": "worms_eye",
-    "dutch": "dutch", "dutch angle": "dutch", "canted": "dutch", "ground level": "ground",
-    "silhouette": "silhouette", "shallow focus": "shallow", "shallow depth of field": "shallow", "bokeh": "shallow",
-    "fisheye": "fisheye", "ultra wide": "ultra_wide", "aerial": "aerial", "drone": "aerial", "underwater": "underwater",
-    "haze": "haze", "fog": "haze", "hard light": "hard_light", "halation": "halation", "reflection": "reflections",
-    "reflections": "reflections", "spotlight": "spotlight", "night vision": "night_vision", "thermal": "thermal",
-    "motion blur": "motion_blur", "double exposure": "double_exposure", "split screen": "split_screen",
-    "typography": "typography", "tilt shift": "tilt_shift", "vintage": "vintage",
+    "extreme wide": "ews", "extreme wide shot": "ews", "ews": "ews", "extreme long shot": "ews",
+    "wide": "ws", "wide shot": "ws", "ws": "ws", "long shot": "ws", "full shot": "ws",
+    "medium wide": "mws", "medium wide shot": "mws", "cowboy shot": "mws", "medium long shot": "mws",
+    "medium": "ms", "medium shot": "ms", "mid shot": "ms",
+    "medium close up": "mcu", "medium close-up": "mcu", "mcu": "mcu",
+    "close up": "cu", "close-up": "cu", "closeup": "cu", "cu": "cu",
+    "extreme close up": "ecu", "extreme close-up": "ecu", "ecu": "ecu", "macro": "ecu",
+    "aerial": "aerial", "drone": "aerial", "drone shot": "aerial",
+    "overhead": "overhead", "top down": "overhead", "birds eye": "overhead", "bird's eye": "overhead",
+    "high angle": "high_angle", "low angle": "low_angle", "dutch": "dutch", "dutch angle": "dutch", "canted": "dutch",
+    "establishing": "establishing", "establishing shot": "establishing",
+    "over the shoulder": "ots", "ots": "ots", "clean single": "single", "single": "single",
+    "two shot": "two_shot", "2 shot": "two_shot", "three shot": "three_shot", "3 shot": "three_shot",
+    "group shot": "group", "group": "group", "crowd": "group", "insert": "insert", "insert shot": "insert",
+    "center": "center", "centered": "center", "centre": "center", "left heavy": "left_heavy", "right heavy": "right_heavy",
+    "balanced": "balanced", "symmetrical": "symmetrical", "symmetry": "symmetrical", "short side": "short_side",
     "locked off": "locked", "locked-off": "locked", "static shot": "locked", "fixed cam": "locked", "tripod": "locked",
     "pan": "pan", "panning": "pan", "tilt": "tilt", "tilt up": "tilt", "tilt down": "tilt",
     "zoom": "zoom", "push in": "zoom", "push": "zoom", "crash zoom": "zoom", "dolly in": "zoom",
     "whip pan": "whip", "whip": "whip", "handheld": "handheld", "hand held": "handheld", "shaky": "handheld",
+    "silhouette": "silhouette", "shallow focus": "shallow", "shallow depth of field": "shallow", "bokeh": "shallow",
+    "fisheye": "fisheye", "ultra wide": "ultra_wide", "underwater": "underwater",
+    "haze": "haze", "fog": "haze", "hard light": "hard_light", "halation": "halation", "reflection": "reflections",
+    "reflections": "reflections", "spotlight": "spotlight", "night vision": "night_vision", "thermal": "thermal",
+    "motion blur": "motion_blur", "double exposure": "double_exposure", "split screen": "split_screen",
+    "typography": "typography", "tilt shift": "tilt_shift", "vintage": "vintage",
 }
 
 
@@ -69,33 +86,48 @@ def tag_for_query(q):
 
 # ---------- AI tags (from scanned frames) ----------
 
-# exclusive groups: one answer per frame; the "neutral" class wins most ordinary frames and is never tagged
+# exclusive groups: one answer per frame. "_none" classes win when the group doesn't apply and are never tagged.
 EXCLUSIVE = {
-    "Framing": {
-        "closeup": ["an extreme close-up of a face", "a close-up shot of a person's face", "a close-up of an object filling the frame"],
-        "wide": ["a wide shot of a landscape with a tiny figure", "a wide establishing shot", "a very wide shot of a city or landscape"],
-        "two_shot": ["two people together in the frame", "a two shot of two actors talking"],
-        "ots": ["an over the shoulder shot, the back of someone's head in the foreground", "a shot over a person's shoulder looking at another person"],
-        "profile": ["a person seen in side profile", "a profile view of a face"],
-        "_neutral": ["a medium shot of a person", "a photo", "a scene", "a still frame from a video"],
+    "size": {
+        "ews": ["an extreme wide shot, tiny distant figures in a vast landscape", "an extreme long shot of a huge open landscape",
+                "a very distant view of a city or mountains"],
+        "ws": ["a wide shot showing a person's whole body and the room around them", "a long shot of a full figure standing in a place",
+               "a wide shot of a street with people"],
+        "mws": ["a medium wide shot of a person from the knees up", "a cowboy shot framed from mid thigh up"],
+        "ms": ["a medium shot of a person from the waist up", "a mid shot of someone sitting at a table"],
+        "mcu": ["a medium close-up of a person from the chest up", "head and shoulders of a person"],
+        "cu": ["a close-up of a person's face filling the frame", "a close-up shot of a face", "a close-up of an object"],
+        "ecu": ["an extreme close-up of an eye", "an extreme close-up of lips", "a macro shot of a tiny detail or texture"],
     },
-    "Angle": {
+    "angle": {
+        "overhead": ["a top-down overhead shot looking straight down", "a flat lay photographed from directly above"],
         "high_angle": ["a high angle shot looking down at a person", "a camera looking down on the subject from above"],
         "low_angle": ["a low angle shot looking up at a person", "a camera looking up at a towering subject"],
-        "overhead": ["a top down overhead shot", "a bird's eye view looking straight down", "a flat lay photographed from directly above"],
-        "worms_eye": ["a worm's eye view looking straight up", "looking up from the ground at the sky and buildings"],
         "dutch": ["a dutch angle with a tilted horizon", "a canted, tilted camera angle"],
-        "ground": ["a camera placed on the ground at ground level", "a shot from the floor at ground level"],
-        "_neutral": ["an eye level shot", "a photo taken at eye level", "a straight on shot"],
+        "_none": ["an eye level shot", "a photo taken at eye level", "a straight-on shot"],
+    },
+    "people": {
+        "single": ["one person alone in the frame", "a single actor in the shot"],
+        "two_shot": ["two people in the frame", "a two shot of two actors"],
+        "three_shot": ["three people in the frame", "a shot of three people together"],
+        "group": ["a group of many people", "a crowd of people"],
+        "_none": ["an empty scene with no people", "a landscape with nobody in it", "an object with no people", "a building"],
     },
 }
+# group -> (always pick one?, needs library-relative check?)
+EXCLUSIVE_MODE = {"size": (True, False), "angle": (False, True), "people": (False, False)}
 # yes / no pairs, judged independently
 BINARY = {
-    "silhouette": (["a dark silhouette against a bright background", "a person in silhouette"], ["a evenly lit subject", "a person lit from the front"]),
+    "aerial": (["an aerial drone shot looking down at the land", "a view from an airplane or drone high above"], ["a shot from the ground"]),
+    "establishing": (["an establishing shot of a building exterior", "a wide establishing shot of a city or location"], ["a close shot of a person", "an interior detail"]),
+    "ots": (["an over the shoulder shot, the back of a person's head and shoulder in the foreground", "a shot over someone's shoulder looking at another person"],
+            ["a single person facing the camera with nothing in front of them"]),
+    "insert": (["an insert shot, a close-up of hands doing something", "a detail shot of an object, a phone, a letter or a key"],
+               ["a shot of a person's face", "a wide shot of a scene"]),
+    "silhouette": (["a dark silhouette against a bright background", "a person in silhouette"], ["an evenly lit subject", "a person lit from the front"]),
     "shallow": (["a shallow depth of field with a very blurry background", "strong bokeh, background out of focus"], ["everything in sharp focus", "deep focus, sharp background"]),
     "fisheye": (["a fisheye lens photo with strong curved distortion", "a round fisheye image"], ["a normal lens photo with straight lines"]),
     "ultra_wide": (["an ultra wide angle lens with stretched edges", "a very wide lens with exaggerated perspective"], ["a normal lens", "a telephoto shot"]),
-    "aerial": (["an aerial drone shot looking down at the land", "a view from an airplane or drone"], ["a shot from the ground"]),
     "underwater": (["an underwater shot", "a person swimming underwater"], ["a shot on land", "a shot above water"]),
     "haze": (["a hazy, smoky atmosphere with light beams", "fog and haze in the air"], ["clear air", "a crisp clean image"]),
     "hard_light": (["hard light with sharp, crisp shadows", "harsh direct sunlight casting hard shadows"], ["soft diffused light", "an overcast soft lit scene"]),
@@ -111,9 +143,7 @@ BINARY = {
     "tilt_shift": (["a tilt shift miniature effect", "a scene that looks like a tiny model"], ["a normal photo"]),
     "vintage": (["old vintage film footage with grain and scratches", "a faded retro photograph from the 1970s"], ["a modern clean digital image"]),
 }
-# frame-level cutoffs (CLIP scores are sharp at this scale; tuned conservative so tags are trustworthy)
-BINARY_P = 0.95
-EXCLUSIVE_P = 0.6
+FACING = (["a person facing left, looking toward the left side of the frame"], ["a person facing right, looking toward the right side of the frame"])
 SHARE = 0.3         # a video gets a tag when this share of its frames show it
 
 _prompts = {}
@@ -127,6 +157,7 @@ def _prompt_vectors():
             _prompts[g] = (keys, np.stack([np.mean([ai.embed_text(p) for p in classes[k]], axis=0) for k in keys]))
         for k, (pos, neg) in BINARY.items():
             _prompts[k] = (np.mean([ai.embed_text(p) for p in pos], axis=0), np.mean([ai.embed_text(p) for p in neg], axis=0))
+        _prompts["_facing"] = tuple(np.mean([ai.embed_text(p) for p in side], axis=0) for side in FACING)
     return _prompts
 
 
@@ -136,22 +167,11 @@ def _norm(m):
 
 def frame_scores(vec):
     """Every tag's probability for one frame (used to calibrate the cutoffs)."""
-    P = _prompt_vectors()
-    v = _norm(np.asarray(vec, np.float32))
-    out = {}
-    for g in EXCLUSIVE:
-        keys, M = P[g]
-        lg = 100.0 * _norm(M) @ v
-        p = np.exp(lg - lg.max()); p /= p.sum()
-        out.update({k: round(float(x), 3) for k, x in zip(keys, p)})
-    for k in BINARY:
-        pos, neg = P[k]
-        d = 100.0 * (float(_norm(pos) @ v) - float(_norm(neg) @ v))
-        out[k] = round(1 / (1 + np.exp(-d)), 3)
-    return out
+    v = _norm(np.asarray(vec, np.float32))[None]
+    return {k: round(float(1 / (1 + np.exp(-a[0])) if k in BINARY else a[0]), 3) for k, a in _raw(v).items()}
 
 
-# Each tag's prompts have their own bias (some score high on almost anything), so a frame only gets a tag
+# Each tag's prompts have their own bias (some score high on almost anything), so a frame only gets a look tag
 # when it stands out from the rest of *your* library on that measure, as well as clearing a floor.
 Z_BINARY, Z_EXCLUSIVE = 2.0, 1.5
 FLOOR_BINARY, FLOOR_EXCLUSIVE = 0.9, 0.55
@@ -172,7 +192,8 @@ def _raw(vecs):
         for ci, k in enumerate(keys):
             if not k.startswith("_"):
                 out[k] = p[:, ci]
-    for k, (pos, neg) in ((k, P[k]) for k in BINARY):
+    for k in BINARY:
+        pos, neg = P[k]
         out[k] = 100.0 * (vecs @ _norm(pos) - vecs @ _norm(neg))
     return out
 
@@ -203,18 +224,89 @@ def frame_tags(times, vecs):
     times = np.asarray(times, np.float32)
     stats = library_stats()
     raw = _raw(vecs)
-    for k, a in raw.items():
-        binary = k in BINARY
-        prob = 1 / (1 + np.exp(-a)) if binary else a
-        floor = FLOOR_BINARY if binary else FLOOR_EXCLUSIVE
+    few = len(vecs) <= 2
+
+    def keep(k, hit, prob):
+        if hit.mean() >= SHARE or (few and hit.any()):
+            out[k] = (float(prob[hit].mean()), float(times[hit].min()))
+
+    for g, classes in EXCLUSIVE.items():
+        always, relative = EXCLUSIVE_MODE[g]
+        keys = [k for k in classes if not k.startswith("_")]
+        if always:   # frame size: every frame has one; tag the sizes the video spends real time in
+            P_ = np.stack([raw[k] for k in keys], axis=1)
+            winner = P_.argmax(axis=1)
+            for ci, k in enumerate(keys):
+                keep(k, (winner == ci) & (P_[:, ci] >= 0.3), raw[k])
+            continue
+        for k in keys:
+            prob = raw[k]
+            hit = prob >= FLOOR_EXCLUSIVE
+            if relative and stats and k in stats:
+                mu, sd = stats[k]
+                hit &= prob >= mu + Z_EXCLUSIVE * sd
+            keep(k, hit, prob)
+    for k in BINARY:
+        a = raw[k]
+        prob = 1 / (1 + np.exp(-a))
         if stats and k in stats:
             mu, sd = stats[k]
-            hit = (prob >= floor) & (a >= mu + (Z_BINARY if binary else Z_EXCLUSIVE) * sd)
+            hit = (prob >= FLOOR_BINARY) & (a >= mu + Z_BINARY * sd)
         else:   # new library: only very confident calls
-            hit = prob >= (0.985 if binary else 0.75)
-        if hit.mean() >= SHARE or (len(vecs) <= 2 and hit.any()):
-            out[k] = (float(prob[hit].mean()), float(times[hit].min()))
+            hit = prob >= 0.985
+        keep(k, hit, prob)
     return out
+
+
+def facing(vecs):
+    """-1 facing left, +1 facing right, 0 unclear (for Short side)."""
+    P = _prompt_vectors()
+    L, R = P["_facing"]
+    v = _norm(np.asarray(vecs, np.float32)).mean(axis=0)
+    d = 100.0 * (float(_norm(L) @ v) - float(_norm(R) @ v))
+    return -1 if d > 1.5 else 1 if d < -1.5 else 0
+
+
+# ---------- composition (measured from the picture) ----------
+
+def composition(path, crop=None):
+    """Where the visual weight sits, and mirror symmetry. -> (tags set, weight centre x 0..1)"""
+    from PIL import Image, ImageFilter, ImageOps
+    im = ImageOps.exif_transpose(Image.open(path)).convert("L")
+    if crop:   # ignore letterbox bars
+        w, h = im.size
+        box = (int(crop[0] * w), int(crop[1] * h), int(crop[2] * w), int(crop[3] * h))
+        if box[2] - box[0] > 32 and box[3] - box[1] > 32:
+            im = im.crop(box)
+    im.thumbnail((256, 256))
+    L = np.asarray(im, np.float32) / 255.0
+    soft = np.asarray(im.filter(ImageFilter.GaussianBlur(12)), np.float32) / 255.0
+    edges = np.asarray(im.filter(ImageFilter.FIND_EDGES).filter(ImageFilter.GaussianBlur(3)), np.float32) / 255.0
+    # visual weight: things that stand out from their surroundings, plus detail
+    weight = np.abs(L - soft) * 2.0 + edges + np.abs(L - L.mean()) * 0.6
+    weight = np.asarray(Image.fromarray((weight / (weight.max() + 1e-6) * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(6)), np.float32)
+    weight = np.clip(weight - np.percentile(weight, 50), 0, None)   # keep what stands out, not the general texture
+    total = weight.sum() + 1e-6
+    h, w = weight.shape
+    xs = np.arange(w)[None, :] / (w - 1)
+    cx = float((weight * xs).sum() / total)
+    cols = weight.sum(axis=0) / total
+    left, mid, right = cols[: w // 3].sum(), cols[w // 3: 2 * w // 3].sum(), cols[2 * w // 3:].sum()
+    flip = L[:, ::-1]
+    a, b = L - L.mean(), flip - flip.mean()
+    sym = float((a * b).sum() / (np.sqrt((a * a).sum() * (b * b).sum()) + 1e-6))
+    tags = set()
+    if sym >= 0.8 and L.std() > 0.06:
+        tags.add("symmetrical")
+    if mid >= 0.5 and abs(cx - 0.5) < 0.07:
+        tags.add("center")
+    elif cx < 0.42 and left > right * 1.6:
+        tags.add("left_heavy")
+    elif cx > 0.58 and right > left * 1.6:
+        tags.add("right_heavy")
+    elif abs(left - right) < 0.12 and mid < 0.5:
+        tags.add("balanced")
+    return tags, cx
 
 
 # ---------- camera movement (from the video) ----------
@@ -357,7 +449,7 @@ def analyze_motion(src, duration):
 
 def pending(limit=10):
     return db.conn().execute(
-        "SELECT m.id, m.kind, m.path, m.duration FROM media m JOIN posts p ON p.id=m.post_id JOIN analysis a ON a.media_id=m.id "
+        "SELECT m.id, m.kind, m.path, m.duration, m.thumb, m.poster, a.crop FROM media m JOIN posts p ON p.id=m.post_id JOIN analysis a ON a.media_id=m.id "
         "WHERE p.deleted_at IS NULL AND p.status='ready' AND COALESCE(a.scan_version,0) >= 1 "
         "AND COALESCE(a.tech_version,0) < ? ORDER BY COALESCE(p.saved_at, p.added_at) DESC LIMIT ?",
         (TECH_VERSION, limit)).fetchall()
@@ -376,8 +468,23 @@ def tag_media(r):
     found = frame_tags(times, vecs)
     label = c.execute("SELECT COALESCE(a.content_user, a.content) FROM media m JOIN media cm ON cm.post_id=m.post_id AND cm.idx=0 "
                       "JOIN analysis a ON a.media_id=cm.id WHERE m.id=?", (r["id"],)).fetchone()
-    if label and label[0] in NOT_FOOTAGE:
+    footage = not (label and label[0] in NOT_FOOTAGE)
+    if not footage:
         found = {k: v for k, v in found.items() if k in ANY_CONTENT}
+    else:
+        pic = db.THUMB_DIR / (r["poster"] or r["thumb"] or "") if (r["poster"] or r["thumb"]) else None
+        if pic and pic.is_file():
+            try:
+                comp, cx = composition(pic, json.loads(r["crop"]) if r["crop"] else None)
+                for k in comp:
+                    found[k] = (0.8, 0.0)
+                # short side: subject off to one side, looking toward the near edge
+                if any(k in found for k in ("single", "two_shot")) and (cx < 0.42 or cx > 0.58) and len(vecs):
+                    f_ = facing(vecs)
+                    if (cx < 0.42 and f_ < 0) or (cx > 0.58 and f_ > 0):
+                        found["short_side"] = (0.6, 0.0)
+            except Exception:
+                traceback.print_exc()
     mot = {}
     if r["kind"] == "video":
         src = db.media_path(r["path"])
@@ -395,7 +502,22 @@ def tag_media(r):
         w.execute("UPDATE analysis SET tech_version=? WHERE media_id=?", (TECH_VERSION, r["id"]))
 
 
+_migrated = {"done": False}
+
+
+def _migrate():
+    """Earlier versions used other tag names: carry your own tags over, drop the rest."""
+    with db.tx() as w:
+        for old, new in RENAMED.items():
+            if old != new:
+                w.execute("UPDATE OR REPLACE techniques SET tag=? WHERE tag=? AND source IN ('user','no')", (new, old))
+        w.execute(f"DELETE FROM techniques WHERE tag NOT IN ({','.join('?' * len(TAGS))})", list(TAGS))
+    _migrated["done"] = True
+
+
 def work_batch():
+    if not _migrated["done"]:
+        _migrate()
     rows = pending()
     for r in rows:
         try:

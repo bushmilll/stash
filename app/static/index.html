@@ -20,17 +20,11 @@
       <button class="cell only-mobile" id="menuBtn">Menu</button>
       <label class="cell search">
         <span class="lbl">Search</span>
+        <span class="chips-in" id="chips"></span>
         <input id="q" type="search" placeholder="Captions, creators, tags, notes" autocomplete="off">
         <kbd>/</kbd>
       </label>
-      <label class="cell hide-mobile"><span class="lbl">Sort</span>
-        <select id="sort">
-          <option value="saved">Newest saves</option>
-          <option value="saved_old">Oldest saves</option>
-          <option value="posted">Newest posts</option>
-          <option value="random">Shuffle</option>
-        </select>
-      </label>
+      <div class="cell hide-mobile sort-cell" id="sortCell"></div>
       <button class="cell hide-mobile" id="byImage" title="Find saves that look like an image (or drop one anywhere)">By image</button>
       <div class="cell toggle" role="group" aria-label="View">
         <button id="viewFrames">Frames</button><button id="viewIndex">Index</button>
@@ -111,8 +105,9 @@
         <button class="cell" id="stepBack" title="Back one frame (,)">− Frame</button>
         <button class="cell" id="stepFwd" title="Forward one frame (.)">+ Frame</button>
         <span class="spacer"></span>
-        <button class="cell" id="setIn" title="Set in point (I)">In <span class="tc" id="inTc">–</span></button>
-        <button class="cell" id="setOut" title="Set out point (O)">Out <span class="tc" id="outTc">–</span></button>
+        <button class="cell" id="setIn" title="Set in point (I). Click again to clear">In <span class="tc" id="inTc">–</span></button>
+        <button class="cell" id="setOut" title="Set out point (O). Click again to clear">Out <span class="tc" id="outTc">–</span></button>
+        <button class="cell" id="preview" title="Play just the marked section, on a loop (P)" disabled>Preview</button>
         <button class="cell primary" id="grab" title="Save full-res frame (G)">Grab frame</button>
       </div>
     </div>

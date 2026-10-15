@@ -133,7 +133,18 @@ def read_upload(filename, raw: bytes):
     return {filename: raw}
 
 
-def import_export(files, include_uncollected=False):
+def preview(files):
+    """What's in the export: how many saves, and each collection with its count (nothing is changed)."""
+    posts, memberships = parse_files(files)
+    counts = {}
+    for code, name in set(memberships):
+        counts[name] = counts.get(name, 0) + 1
+    in_any = {code for code, _ in memberships}
+    return {"posts_found": len(posts), "uncollected": len(set(posts) - in_any),
+            "collections": [{"name": n, "count": c} for n, c in sorted(counts.items(), key=lambda kv: kv[0].lower())]}
+
+
+def import_export(files, include_uncollected=False, only=None):
     """Bring in saves from Instagram's data export.
 
     By default only saves that are in one of your collections are added (Stash is for references, not
@@ -141,6 +152,11 @@ def import_export(files, include_uncollected=False):
     already has, which fixes "Newest saves" ordering.
     """
     posts, memberships = parse_files(files)
+    if only is not None:   # just the collections you picked: everything else in the export is left alone
+        only = set(only)
+        memberships = [(code, n) for code, n in memberships if n in only]
+        keep = {code for code, _ in memberships}
+        posts = {code: v for code, v in posts.items() if code in keep}
     in_collection = {code for code, _ in memberships}
     new = skipped = dated = 0
     with db.tx() as c:
