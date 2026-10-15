@@ -134,6 +134,23 @@ def _norm(m):
     return m / (np.linalg.norm(m, axis=-1, keepdims=True) + 1e-8)
 
 
+def frame_scores(vec):
+    """Every tag's probability for one frame (used to calibrate the cutoffs)."""
+    P = _prompt_vectors()
+    v = _norm(np.asarray(vec, np.float32))
+    out = {}
+    for g in EXCLUSIVE:
+        keys, M = P[g]
+        lg = 100.0 * _norm(M) @ v
+        p = np.exp(lg - lg.max()); p /= p.sum()
+        out.update({k: round(float(x), 3) for k, x in zip(keys, p)})
+    for k in BINARY:
+        pos, neg = P[k]
+        d = 100.0 * (float(_norm(pos) @ v) - float(_norm(neg) @ v))
+        out[k] = round(1 / (1 + np.exp(-d)), 3)
+    return out
+
+
 def frame_tags(times, vecs):
     """vecs: (n, 512) frame vectors of one media item -> {tag: (score, first t)}."""
     P = _prompt_vectors()

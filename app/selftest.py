@@ -164,6 +164,11 @@ def run(port):
             check("AI technique tags run", isinstance(tf, dict) and isinstance(tc, dict))
             if on_ci:
                 print(f"::notice title=Technique tags::silhouette frame -> {sorted(tf)}; text card -> {sorted(tc)}", flush=True)
+                fw = ai.embed_image(tmp / "b.png")
+                plainv = ai.embed_image(tmp / "a.png")
+                for name, vv in (("silhouette", v2), ("textcard", v1), ("word", fw), ("plain", plainv)):
+                    sc = techniques.frame_scores(vv)
+                    print(f"::notice title=Scores {name}::" + " ".join(f"{k}={x}" for k, x in sorted(sc.items(), key=lambda kv: -kv[1])), flush=True)
             sc_word, sc_film = float(ai.embed_image(tmp / "b.png") @ q), float(ai.embed_image(tmp / "film.jpg") @ q)
             check("AI search ranks the matching image higher", sc_word > sc_film, f"{sc_word:.3f} vs {sc_film:.3f}")
             if on_ci:
