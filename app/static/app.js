@@ -1131,6 +1131,8 @@ function renderDrawer(focus) {
   } }, "Check for updates");
   statusSec.append(verLine, h("div", { class: "row" }, verBtn));
   if (!UPD) checkUpdate().then((u) => { if (u) verLine.textContent = "Stash " + u.current; });
+  for (const f of s._catching_up || []) statusSec.append(h("p", { class: "hint" },
+    `${f.name}: catching up on older saves. ${f.seen ? f.seen.toLocaleString() + " read so far. " : ""}It keeps going in the background from where it left off, even after Stash is closed and reopened.`));
   if (s._signed_in === false) statusSec.append(h("p", { style: "color:var(--danger)" },
     "Instagram isn't seeing you as signed in, so it's handing out smaller, softer videos. Open instagram.com in the browser chosen below, make sure you're logged in, and if your Mac asks about “Chrome Safe Storage”, choose Always Allow."));
   if (!s._gallery_dl) statusSec.append(h("p", { style: "color:var(--danger)" }, "The sync engine is missing from this copy of Stash. Download the latest version and replace the app."));

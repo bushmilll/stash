@@ -114,6 +114,11 @@ def _scheduler():
                 todo = db.conn().execute(
                     "SELECT COUNT(*) FROM media m JOIN posts p ON p.id=m.post_id WHERE m.kind='video' AND COALESCE(m.hq,0)=0 "
                     "AND p.status='ready' AND p.deleted_at IS NULL").fetchone()[0]
+                ls = db.conn().execute("SELECT COALESCE(finished, started), status FROM jobs WHERE kind='sync' ORDER BY id DESC LIMIT 1").fetchone()
+                last_sync = ((ls[0] or 0) + (2 * 3600 if ls[1] == "error" else 0)) if ls else 0
+                if feeds_incomplete() and not busy and time.time() - last_sync > 10 * 60:
+                    enqueue("sync")       # a collection hasn't been read to the end yet: keep going from the bookmark
+                    busy = 1
                 if todo and not busy and time.time() - last_up > 15 * 60:
                     enqueue("upgrade")    # sharpen older videos in the background, a batch at a time
             hours = float(s.get("auto_sync_hours") or 0)
@@ -411,9 +416,13 @@ def _save_post(post, files, collection=None, upgrade=False, saved_at=None):
     return code
 
 
-def _iter_posts(url):
-    """Yield (post_meta, [(file_url, file_meta), ...]) for each post in a feed, lazily."""
+def _iter_posts(url, cursor=None, holder=None):
+    """Yield (post_meta, [(file_url, file_meta), ...]) for each post in a feed, lazily.
+    cursor: start from this bookmark instead of the top. holder["ex"] lets the caller read the live bookmark."""
+    gdl_config.set(("extractor", "instagram"), "cursor", cursor or True)
     ex = gdl_extractor.find(url)
+    if holder is not None:
+        holder["ex"] = ex
     if ex is None:
         raise StopSync(f"That doesn't look like an Instagram saved/collection URL: {url}")
     post, files = None, []
@@ -446,6 +455,29 @@ def _status(code):
     return (r["id"], r["status"]) if r else (None, None)
 
 
+def _feed_state(url):
+    r = db.conn().execute("SELECT complete, cursor, seen FROM feeds WHERE url=?", (url,)).fetchone()
+    return {"complete": r[0], "cursor": r[1], "seen": r[2] or 0} if r else {"complete": 0, "cursor": None, "seen": 0}
+
+
+def _save_feed(url, **kw):
+    st = _feed_state(url)
+    st.update(kw)
+    with db.tx() as c:
+        c.execute("INSERT INTO feeds (url, complete, cursor, seen, updated) VALUES (?,?,?,?,?) ON CONFLICT(url) DO UPDATE SET "
+                  "complete=excluded.complete, cursor=excluded.cursor, seen=excluded.seen, updated=excluded.updated",
+                  (url, st["complete"], st["cursor"], st["seen"], db.now()))
+
+
+def _oldest():
+    return int(db.conn().execute("SELECT MIN(COALESCE(saved_at, added_at)) FROM posts").fetchone()[0] or db.now())
+
+
+def feeds_incomplete():
+    s = db.load_settings()
+    return [u for u, _ in _feeds(s) if not _feed_state(u)["complete"]]
+
+
 def run_sync(jid):
     s = db.load_settings()
     _configure(s)
@@ -461,51 +493,76 @@ def run_sync(jid):
     new_total, linked, failed_posts = 0, 0, 0
     for fi, (url, name) in enumerate(feeds):
         label = name or ("All saved" if "all-posts" in url else url)
-        known_streak, seen = 0, 0
-        try:
-            for post, files in _iter_posts(url):
-                _check_cancel()
-                seen += 1
-                code = post.get("post_shortcode")
-                col = name or post.get("collection_name")
-                pid, status = _status(code)
-                stamp = run_start - seen
-                if rerank and pid and pid not in ranked:
-                    ranked.add(pid)
-                    with db.tx() as c:
-                        c.execute("UPDATE posts SET saved_at=? WHERE id=? AND COALESCE(saved_src,'feed')='feed'", (stamp, pid))
-                if status in ("ready", "removed"):
-                    known_streak += 1
-                    if col and status == "ready":
+        st = _feed_state(url)
+        # 1) the top of the feed: brand-new saves. Once Stash has read the whole collection, it can stop as soon
+        #    as it reaches posts it already has. Until then it keeps going past them (see pass 2).
+        passes = [("top", None)]
+        if not st["complete"]:
+            passes.append(("deep", st["cursor"]))
+        for mode, cursor in passes:
+            known_streak, seen = 0, 0
+            floor = _oldest() - 1     # older saves found deeper in the feed sort below everything known so far
+            holder = {}
+            last_save = time.time()
+            try:
+                for post, files in _iter_posts(url, cursor, holder):
+                    _check_cancel()
+                    seen += 1
+                    code = post.get("post_shortcode")
+                    col = name or post.get("collection_name")
+                    pid, status = _status(code)
+                    stamp = (run_start - seen) if mode == "top" else floor - seen
+                    if rerank and pid and pid not in ranked:
+                        ranked.add(pid)
                         with db.tx() as c:
-                            before = c.total_changes
-                            db.add_to_collection(c, pid, col, source="instagram")
-                            if c.total_changes > before:
-                                linked += 1
-                                db.reindex(c, pid)
-                    if known_streak >= stop_after and not rerank:
-                        break
+                            c.execute("UPDATE posts SET saved_at=? WHERE id=? AND COALESCE(saved_src,'feed')='feed'", (stamp, pid))
+                    if status in ("ready", "removed"):
+                        known_streak += 1
+                        if col and status == "ready":
+                            with db.tx() as c:
+                                before = c.total_changes
+                                db.add_to_collection(c, pid, col, source="instagram")
+                                if c.total_changes > before:
+                                    linked += 1
+                                    db.reindex(c, pid)
+                        if mode == "top" and known_streak >= stop_after and not rerank:
+                            break
+                    else:
+                        known_streak = 0
+                        try:
+                            _save_post(post, files, col, saved_at=stamp)
+                            new_total += 1
+                        except (Cancelled, StopSync):
+                            raise
+                        except Exception as e:
+                            # one bad post shouldn't stop the whole run: park it for the backlog fetcher
+                            msg = _friendly(e)
+                            if _blocking(msg):
+                                raise StopSync(f"{label}: {msg}")
+                            failed_posts += 1
+                            with db.tx() as c:
+                                db.upsert_post(c, code, username=post.get("username") or "", status="failed", error=msg[:300])
+                    if mode == "deep" and time.time() - last_save > 10:   # bookmark, so a closed app resumes here
+                        _save_feed(url, cursor=getattr(holder.get("ex"), "_cursor", None) or st["cursor"], seen=st["seen"] + seen)
+                        last_save = time.time()
+                    where = "catching up on older saves" if mode == "deep" else "checking for new saves"
+                    _update(jid, done=fi, total=len(feeds),
+                            message=f"{label}: {where}, {st['seen'] + seen if mode == 'deep' else seen} checked, {new_total} new so far")
                 else:
-                    known_streak = 0
-                    try:
-                        _save_post(post, files, col, saved_at=stamp)
-                        new_total += 1
-                    except (Cancelled, StopSync):
-                        raise
-                    except Exception as e:
-                        # one bad post shouldn't stop the whole run: park it for the backlog fetcher
-                        msg = _friendly(e)
-                        if _blocking(msg):
-                            raise StopSync(f"{label}: {msg}")
-                        failed_posts += 1
-                        with db.tx() as c:
-                            db.upsert_post(c, code, username=post.get("username") or "", status="failed", error=msg[:300])
-                _update(jid, done=fi, total=len(feeds),
-                        message=f"{label}: {seen} checked, {new_total} new so far")
-        except (Cancelled, StopSync):
-            raise
-        except Exception as e:
-            raise StopSync(f"{label}: {_friendly(e)}")
+                    # reached the very end of the feed: from now on, syncs only need the top
+                    if mode == "deep" or not st["complete"]:
+                        _save_feed(url, complete=1, cursor=None, seen=(st["seen"] + seen) if mode == "deep" else seen)
+                        st["complete"] = 1
+            except (Cancelled, StopSync):
+                if mode == "deep":
+                    _save_feed(url, cursor=getattr(holder.get("ex"), "_cursor", None) or st["cursor"], seen=st["seen"] + seen)
+                raise
+            except Exception as e:
+                if mode == "deep":
+                    _save_feed(url, cursor=getattr(holder.get("ex"), "_cursor", None) or st["cursor"], seen=st["seen"] + seen)
+                raise StopSync(f"{label}: {_friendly(e)}")
+            if st["complete"]:
+                break
     if rerank:
         db.save_settings({"rank_version": 1})
     msg = f"Synced {len(feeds)} feed(s): {new_total} new post(s)"

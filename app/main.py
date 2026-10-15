@@ -482,6 +482,7 @@ async def settings(request):
     s = db.load_settings()
     s["_gallery_dl"] = sync.HAVE_GDL
     s["_signed_in"] = sync.SIGNIN["ok"]
+    s["_catching_up"] = [{"name": n or u, "seen": sync._feed_state(u)["seen"]} for u, n in sync._feeds(s) if not sync._feed_state(u)["complete"]]
     s["_ffmpeg"] = media.ffmpeg_ok()
     s["_desktop"] = os.environ.get("STASH_DESKTOP") == "1"
     from . import __version__
