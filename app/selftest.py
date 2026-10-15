@@ -37,7 +37,7 @@ def run(port):
             check("serves " + path, st == 200 and len(b) > 100)
         except Exception as e:
             check("serves " + path, False, str(e))
-    for path in ("/api/sidebar", "/api/posts", "/api/facets", "/api/boards", "/api/library", "/api/update"):
+    for path in ("/api/sidebar", "/api/posts", "/api/facets", "/api/boards", "/api/library", "/api/update", "/api/techniques"):
         try:
             st, _ = get(path)
             check("api " + path, st == 200)
@@ -78,6 +78,30 @@ def run(port):
             check(f"grab frame from {f.stem}", ok, "" if ok else "blank or unreadable")
             poster = media.make_poster(f, f"selftest/{f.stem}")
             check(f"poster from {f.stem}", bool(poster))
+        # camera movement: a slow pan across a test pattern, and a locked-off shot
+        from app import techniques
+        pan = tmp / "pan.mp4"
+        subprocess.run([media.FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=1280x720:d=4", "-vf",
+                        "crop=640:360:x='t*120':y=180,format=yuv420p", str(pan)], check=True, timeout=120)
+        mt = techniques.analyze_motion(pan, 4)
+        check("movement: pan detected", "pan" in mt, str(mt))
+        mt2 = techniques.analyze_motion(vid, 2)
+        check("movement: no pan on a still shot", "pan" not in mt2 and "whip" not in mt2, str(mt2))
+        # moodboard video: one still layer + one looping tile
+        from app import boardvideo
+        Image.new("RGB", (640, 360), (236, 234, 229)).save(tmp / "layer0.png")
+        seg_ok = True
+        try:
+            boardvideo._cut(pan, 0.5, 1.5, 200, 120, True, "#dddddd", tmp / "seg.mp4")
+        except Exception as e:
+            seg_ok = False
+            check("moodboard video: cut a loop", False, repr(e))
+        if seg_ok:
+            out = subprocess.run([media.FFMPEG, "-v", "error", "-y", "-loop", "1", "-framerate", "30", "-i", str(tmp / "layer0.png"),
+                                  "-stream_loop", "-1", "-i", str(tmp / "seg.mp4"), "-filter_complex",
+                                  "[0:v]format=rgba[b];[1:v]format=rgba,rotate=0.05:c=none:ow=rotw(0.05):oh=roth(0.05)[r];[b][r]overlay=40:40,format=yuv420p[o]",
+                                  "-map", "[o]", "-t", "3", "-c:v", "libx264", "-crf", "14", str(tmp / "board.mp4")], timeout=180)
+            check("moodboard video export", out.returncode == 0 and (tmp / "board.mp4").stat().st_size > 1000)
     except Exception as e:
         check("media pipeline", False, repr(e))
 
@@ -133,6 +157,13 @@ def run(port):
             sims = vecs @ q
             best_t = times[int(np.argmax(sims))]
             check("AI search finds the moment in a video", 2.0 <= best_t < 4.0, f"best match at {best_t}s, frames {sorted(set(times))}")
+            # technique tags: the silhouette frame should read as a silhouette; the text card as typography
+            from app import techniques
+            tf = techniques.frame_tags([0.0], v2[None])
+            tc = techniques.frame_tags([0.0], v1[None])
+            check("AI technique tags run", isinstance(tf, dict) and isinstance(tc, dict))
+            if on_ci:
+                print(f"::notice title=Technique tags::silhouette frame -> {sorted(tf)}; text card -> {sorted(tc)}", flush=True)
             sc_word, sc_film = float(ai.embed_image(tmp / "b.png") @ q), float(ai.embed_image(tmp / "film.jpg") @ q)
             check("AI search ranks the matching image higher", sc_word > sc_film, f"{sc_word:.3f} vs {sc_film:.3f}")
             if on_ci:

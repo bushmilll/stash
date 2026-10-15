@@ -15,7 +15,7 @@ from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from . import ai, analyze, db, importer, media, storage, sync, updater
+from . import ai, analyze, boardvideo, db, importer, learn, media, storage, sync, techniques, updater
 
 STATIC = Path(__file__).parent / "static"
 SORTS = {
@@ -77,6 +77,11 @@ async def list_posts(request):
         where.append("NOT EXISTS (SELECT 1 FROM media m WHERE m.post_id=p.id AND m.kind='video')")
     if qp.get("favorite"):
         where.append("p.favorite=1")
+    tech = qp.get("tech")
+    if tech:
+        where.append("EXISTS (SELECT 1 FROM techniques tq JOIN media tm ON tm.id=tq.media_id "
+                     "WHERE tm.post_id=p.id AND tq.tag=? AND tq.source!='no')")
+        args.append(tech)
     # look filters (computed from the pixels of the cover image)
     look = {k: qp.get(k) for k in ("tone", "sat", "temp", "contrast", "ar") if qp.get(k)}
     content = qp.get("content")
@@ -113,6 +118,17 @@ async def list_posts(request):
         else:
             for pid in text_ids:
                 scored[pid] = 0
+        tag = techniques.tag_for_query(sem_q)
+        if tag:   # typed a technique ("whip pan", "low angle"): posts tagged with it lead
+            hidden = (await run_in_threadpool(learn.related, learn.norm_q(sem_q)))[1]
+            top = max(scored.values(), default=0.0)
+            for pid, idx, t, sc in db.conn().execute(
+                    "SELECT tm.post_id, tm.idx, tq.t, MAX(tq.score) FROM techniques tq JOIN media tm ON tm.id=tq.media_id "
+                    "WHERE tq.tag=? AND tq.source!='no' GROUP BY tm.post_id", (tag,)):
+                if pid in hidden:
+                    continue
+                scored[pid] = top + 0.02 + 0.01 * float(sc or 0)
+                hits[pid] = (idx, t or 0)
         ranked = [pid for pid, _ in sorted(scored.items(), key=lambda kv: -kv[1])]
     elif qp.get("similar"):
         v = analyze.vec_for_post(int(qp["similar"]))
@@ -148,16 +164,7 @@ async def list_posts(request):
             if i not in rows:
                 continue
             if i in hits:   # show the item and the moment that matched the search
-                item = db.post_dict(c, rows[i], full=True)
-                idx, t = hits[i]
-                m_ = next((mm for mm in item["media"] if mm["idx"] == idx), item["media"][0] if item["media"] else None)
-                item["media_count"] = len(item["media"])
-                item["media"] = [m_] if m_ else []
-                if m_:
-                    item["hit"] = {"idx": idx, "t": t}
-                    if m_["kind"] == "video" and t >= 0.5:
-                        m_["hit_src"] = f"/api/media/{m_['id']}/frame?t={t:.2f}"
-                items.append(item)
+                items.append(_with_hit(c, rows[i], *hits[i]))
             else:
                 items.append(db.post_dict(c, rows[i]))
         return JSONResponse({"items": items, "more": offset + limit < len(ids), "total": len(ids) if offset == 0 else None})
@@ -175,7 +182,15 @@ async def list_posts(request):
            f"{'WHERE ' + ' AND '.join(where) if where else ''} ORDER BY {order} LIMIT ? OFFSET ?")
     c = db.conn()
     rows = c.execute(sql, args + [limit + 1, offset]).fetchall()
-    items = [db.post_dict(c, r) for r in rows[:limit]]
+    items = []
+    for r in rows[:limit]:
+        if tech:   # start each tile at the moment the technique shows up
+            h_ = c.execute("SELECT tm.idx, tq.t FROM techniques tq JOIN media tm ON tm.id=tq.media_id WHERE tm.post_id=? "
+                           "AND tq.tag=? AND tq.source!='no' ORDER BY tq.score DESC LIMIT 1", (r["id"], tech)).fetchone()
+            if h_:
+                items.append(_with_hit(c, r, h_[0], h_[1] or 0))
+                continue
+        items.append(db.post_dict(c, r))
     total = None
     if offset == 0:
         total = c.execute(f"SELECT COUNT(*) FROM posts p {' '.join(joins)} "
@@ -183,12 +198,58 @@ async def list_posts(request):
     return JSONResponse({"items": items, "more": len(rows) > limit, "total": total})
 
 
+def _with_hit(c, row, idx, t):
+    item = db.post_dict(c, row, full=True)
+    m_ = next((mm for mm in item["media"] if mm["idx"] == idx), item["media"][0] if item["media"] else None)
+    item["media_count"] = len(item["media"])
+    item["media"] = [m_] if m_ else []
+    if m_:
+        item["hit"] = {"idx": idx, "t": t}
+        if m_["kind"] == "video" and t >= 0.5:
+            m_["hit_src"] = f"/api/media/{m_['id']}/frame?t={t:.2f}"
+    return item
+
+
 async def get_post(request):
     c = db.conn()
     r = c.execute("SELECT * FROM posts WHERE id=?", (request.path_params["id"],)).fetchone()
     if not r:
         return err(404, "Not found")
-    return JSONResponse(db.post_dict(c, r, full=True))
+    d = db.post_dict(c, r, full=True)
+    for m in d["media"]:
+        m["techniques"] = [{"tag": tg, "label": techniques.TAGS[tg][0], "group": techniques.TAGS[tg][1], "source": src, "t": t}
+                           for tg, src, t in c.execute("SELECT tag, source, t FROM techniques WHERE media_id=? AND source!='no' "
+                                                       "ORDER BY score DESC", (m["id"],)) if tg in techniques.TAGS]
+    return JSONResponse(d)
+
+
+async def technique_list(request):
+    return JSONResponse({"tags": [{"tag": k, "label": l, "group": g} for k, (l, g) in techniques.TAGS.items()],
+                         "groups": techniques.GROUPS, "learned": learn.stats()})
+
+
+async def set_technique(request):
+    """Add a technique to a post by hand, or remove one the AI got wrong. Look-alikes follow your call."""
+    body = await request.json()
+    tag = body.get("tag")
+    if tag not in techniques.TAGS:
+        return err(400, "Unknown technique")
+    techniques.set_user_tag(request.path_params["id"], tag, bool(body.get("on")))
+    return JSONResponse({"ok": True})
+
+
+async def feedback(request):
+    body = await request.json()
+    q = body.get("q") or ""
+    if body.get("signal") == "reset":
+        learn.forget()
+        return JSONResponse({"ok": True})
+    for pid in body.get("post_ids") or [body.get("post_id")]:
+        if pid:
+            learn.record(q, int(pid), body.get("signal"), body.get("idx", 0), body.get("t", 0))
+    for pid in body.get("skipped", [])[:12]:
+        learn.record(q, int(pid), "skip")
+    return JSONResponse({"ok": True})
 
 
 async def update_post(request):
@@ -434,6 +495,9 @@ async def facets(request):
         "SELECT COALESCE(a.content_user, a.content), COUNT(*) FROM posts p JOIN media m ON m.post_id=p.id AND m.idx=0 "
         "JOIN analysis a ON a.media_id=m.id WHERE p.deleted_at IS NULL AND p.status='ready' "
         "AND COALESCE(a.content_user, a.content) IS NOT NULL GROUP BY 1")}
+    out["tech"] = {r[0]: r[1] for r in c.execute(
+        "SELECT tq.tag, COUNT(DISTINCT tm.post_id) FROM techniques tq JOIN media tm ON tm.id=tq.media_id "
+        "JOIN posts p ON p.id=tm.post_id WHERE p.deleted_at IS NULL AND p.status='ready' AND tq.source!='no' GROUP BY tq.tag")}
     out["pending"] = len(analyze.pending(100000))
     return JSONResponse(out)
 
@@ -592,6 +656,7 @@ async def set_content(request):
     with db.tx() as c:
         c.execute("INSERT INTO analysis (media_id, version) VALUES (?, 0) ON CONFLICT(media_id) DO NOTHING", (mid,))
         c.execute("UPDATE analysis SET content_user=? WHERE media_id=?", (val, mid))
+        c.execute("UPDATE analysis SET ai_version=0 WHERE content_user IS NULL")   # re-tag the rest using your correction
     return JSONResponse({"ok": True})
 
 
@@ -785,9 +850,11 @@ async def board_one(request):
         return JSONResponse({"ok": True})
     body = await request.json()   # PUT
     # media: order in the list is the order in Sheet / Columns / Rows; cx/cy/cw/ch/rot is its Collage spot
-    keep = ("type", "media_id", "x", "y", "w", "z", "h", "text", "size", "color", "font", "cx", "cy", "cw", "ch", "rot")
+    keep = ("type", "media_id", "x", "y", "w", "z", "h", "text", "size", "color", "font", "cx", "cy", "cw", "ch", "rot",
+            "vin", "vout", "still")   # vin/vout: the section a video tile loops; still: the frame static exports show
     items = [{k: it[k] for k in keep if k in it} for it in body.get("items", [])][:500]
-    allowed = {"layout": str, "show_title": bool, "title_pos": str, "captions": bool, "tile_ar": str, "fill": bool, "tilt": bool}
+    allowed = {"layout": str, "show_title": bool, "title_pos": str, "captions": (str, bool), "numbered": bool, "tile_ar": str,
+               "fill": bool, "tilt": bool, "video_labels": bool, "motion": bool}
     settings = {k: v for k, v in (body.get("settings") or {}).items() if k in allowed and isinstance(v, allowed[k])}
     with db.tx() as w:
         w.execute("UPDATE boards SET name=?, bg=?, width=?, gap=?, items=?, settings=?, updated_at=? WHERE id=?",
@@ -834,6 +901,23 @@ async def board_pdf(request):
         return out
     out = await run_in_threadpool(work)
     return JSONResponse({"url": f"/exports/{out.name}", "name": out.name, "size": out.stat().st_size})
+
+
+async def board_video(request):
+    """Start an MP4 export of a moodboard: still layers + looping tiles, stacked in order."""
+    form = await request.form()
+    spec = json.loads(form["spec"])
+    n_png = sum(1 for l in spec.get("layers", []) if l.get("type") == "png")
+    layers = [await form[f"layer{i}"].read() for i in range(n_png)]
+    if not layers or not any(l.get("type") == "video" for l in spec.get("layers", [])):
+        return err(400, "Nothing on this board moves yet")
+    spec["duration"] = max(1.0, min(300.0, float(spec.get("duration", 15))))
+    return JSONResponse({"job": boardvideo.start(spec, layers)})
+
+
+async def board_video_status(request):
+    s = boardvideo.status(request.path_params["job"])
+    return JSONResponse(s) if s else err(404, "That export isn't running any more")
 
 
 def _safe_name(n):
@@ -884,6 +968,8 @@ def create_app():
         Route("/api/storage/move", storage_move, methods=["POST"]),
         Route("/api/boards", boards, methods=["GET", "POST"]),
         Route("/api/boards/pdf", board_pdf, methods=["POST"]),
+        Route("/api/boards/video", board_video, methods=["POST"]),
+        Route("/api/boards/video/{job}", board_video_status),
         Route("/api/boards/{id:int}", board_one, methods=["GET", "PUT", "DELETE"]),
         Route("/api/boards/{id:int}/add", board_add, methods=["POST"]),
         Route("/api/posts/{id:int}", get_post),
@@ -893,6 +979,9 @@ def create_app():
         Route("/api/collections", create_collection, methods=["POST"]),
         Route("/api/collections/rename", rename_collection, methods=["POST"]),
         Route("/api/media/{id:int}/content", set_content, methods=["POST"]),
+        Route("/api/media/{id:int}/technique", set_technique, methods=["POST"]),
+        Route("/api/techniques", technique_list),
+        Route("/api/feedback", feedback, methods=["POST"]),
         Route("/api/media/{id:int}/frame", media_frame),
         Route("/api/media/{id:int}/download", download_media),
         Route("/api/media/{id:int}/{action}", tool, methods=["POST"]),

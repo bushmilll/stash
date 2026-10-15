@@ -67,21 +67,27 @@
     <span class="spacer"></span>
     <button class="cell danger" id="boardDelete">Delete</button>
     <button class="cell" id="boardPdf">Export PDF</button>
+    <button class="cell" id="boardVideo" title="An MP4 where looping video tiles play">Export video</button>
     <button class="cell primary" id="boardPng">Export PNG</button>
   </div>
   <div class="board-bar board-opts">
     <div class="cell toggle" role="group" aria-label="Title"><span class="lbl">Title</span><button data-title="top">Top</button><button data-title="bottom">Bottom</button><button data-title="off">Off</button></div>
-    <div class="cell toggle" role="group" aria-label="Captions" data-only="sheet"><span class="lbl">Captions</span><button data-cap="1">On</button><button data-cap="0">Off</button></div>
-    <div class="cell toggle" role="group" aria-label="Tile shape" data-only="sheet"><span class="lbl">Tiles</span><button data-ar="orig" title="The standard 4:5 sheet">Original</button><button data-ar="3:2">3:2</button><button data-ar="16:9">16:9</button><button data-ar="9:16">9:16</button></div>
+    <div class="cell toggle" role="group" aria-label="Numbers" data-only="sheet"><span class="lbl">Numbered</span><button data-num="1">On</button><button data-num="0">Off</button></div>
+    <div class="cell toggle" role="group" aria-label="Captions" data-only="sheet"><span class="lbl">Captions</span><button data-cap="full" title="Handle and the start of the caption">Full</button><button data-cap="handles" title="Just the handles">Handles</button><button data-cap="off">Off</button></div>
+    <div class="cell toggle" role="group" aria-label="Tile shape" data-only="sheet"><span class="lbl">Tiles</span><button data-ar="orig" title="The standard 4:5 sheet">Original</button><button data-ar="1:1">1:1</button><button data-ar="3:2">3:2</button><button data-ar="16:9">16:9</button><button data-ar="9:16">9:16</button></div>
     <div class="cell toggle" role="group" aria-label="Images" data-only="sheet"><span class="lbl">Images</span><button data-fill="0" title="Show the whole image inside its tile">Fit</button><button data-fill="1" title="Crop the image to fill its tile">Fill</button></div>
     <div class="cell toggle" role="group" aria-label="Tilt" data-only="collage"><span class="lbl">Tilt</span><button data-tilt="0">Off</button><button data-tilt="1">On</button></div>
     <button class="cell" id="boardShuffle" data-only="collage" title="Scatter the posts into a new arrangement">Shuffle</button>
+    <div class="cell toggle" role="group" aria-label="Layer" data-only="collage"><span class="lbl">Layer</span><button data-layer="back" title="Send to back (Shift+[)">To back</button><button data-layer="down" title="Back one ([)">Back</button><button data-layer="up" title="Forward one (])">Forward</button><button data-layer="front" title="Bring to front (Shift+])">To front</button></div>
+    <div class="cell toggle" role="group" aria-label="Video labels"><span class="lbl">Video labels</span><button data-vl="1">On</button><button data-vl="0">Off</button></div>
+    <div class="cell toggle" role="group" aria-label="Loops"><span class="lbl">Loops</span><button data-motion="1" title="Play looping video tiles on the board">Play</button><button data-motion="0" title="Hold every tile still">Pause</button></div>
     <label class="cell"><span class="lbl">Space</span><input type="range" id="boardGap" min="0" max="40" value="12" aria-label="Spacing"></label>
     <div class="cell"><span class="lbl">Ground</span><div class="swatches" id="swatches"></div></div>
     <button class="cell" id="addNote">Add note</button>
     <span class="spacer"></span>
   </div>
   <div class="board-scroll" id="boardScroll"><div class="paper-wrap" id="paperWrap"><div class="paper" id="paper"></div></div></div>
+  <div class="clip-panel" id="clipPanel" hidden></div>
   <div class="board-foot"><span id="boardInfo"></span><span id="boardHint"></span></div>
 </div>
 
@@ -101,6 +107,7 @@
       <div class="deck-row">
         <button class="cell" id="play">Play</button>
         <span class="cell tc" id="tc">00:00.00</span>
+        <button class="cell" id="mute" title="Sound on/off (M)">Unmute</button>
         <button class="cell" id="stepBack" title="Back one frame (,)">− Frame</button>
         <button class="cell" id="stepFwd" title="Forward one frame (.)">+ Frame</button>
         <span class="spacer"></span>

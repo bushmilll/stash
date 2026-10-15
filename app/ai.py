@@ -263,6 +263,24 @@ def _prompt_matrix():
     return _prompt_cache["m"]
 
 
+_examples = {"n": -1, "vecs": None, "labels": None}
+
+
+def _corrections():
+    """Covers you've re-labelled by hand, as examples for the rest of the library."""
+    c = db.conn()
+    n = c.execute("SELECT COUNT(*) FROM analysis WHERE content_user IS NOT NULL").fetchone()[0]
+    if n != _examples["n"]:
+        vecs, labels = [], []
+        for mid, label in c.execute("SELECT media_id, content_user FROM analysis WHERE content_user IS NOT NULL"):
+            rows = c.execute("SELECT vec FROM frames WHERE media_id=? ORDER BY t LIMIT 3", (mid,)).fetchall()
+            if rows:
+                v = np.mean([np.frombuffer(r[0], np.float16).astype(np.float32) for r in rows], axis=0)
+                vecs.append(v / (np.linalg.norm(v) + 1e-8)); labels.append(label)
+        _examples.update(n=n, vecs=np.stack(vecs) if vecs else None, labels=labels)
+    return _examples["vecs"], _examples["labels"]
+
+
 def classify(img_vec, caption=""):
     keys, mat = _prompt_matrix()
     logits = 100.0 * mat @ img_vec
@@ -275,6 +293,12 @@ def classify(img_vec, caption=""):
     for k, rx in CAPTION_HINTS.items():
         if re.search(rx, cap):
             scores[k] += 0.25           # a nudge, not an override
+    vecs, labels = _corrections()
+    if vecs is not None:          # posts that look like ones you've corrected follow your call
+        sims = vecs @ img_vec
+        for j in np.argsort(-sims)[:5]:
+            if sims[j] >= 0.84:
+                scores[labels[j]] = scores.get(labels[j], 0) + 0.6 * (float(sims[j]) - 0.8) / 0.2
     total = sum(scores.values())
     scores = {k: v / total for k, v in scores.items()}
     best = max(scores, key=scores.get)
@@ -394,7 +418,12 @@ def tag_batch():
 
 def work_batch():
     """One unit of background AI work; returns True if it did something."""
-    return bool(scan_batch() or tag_batch())
+    if scan_batch() or tag_batch():
+        return True
+    if not ready():
+        return False
+    from . import techniques
+    return bool(techniques.work_batch())
 
 
 # ---------- search ----------
@@ -423,14 +452,20 @@ def _load_index():
 
 def search(q):
     """[(post_id, score, media_idx, t)] best first; broad, with looser matches at the bottom."""
-    key = q.strip().lower()
+    from . import learn
     ix = _load_index()
+    key = (q.strip().lower(), learn.version())
     if key in _cache:
         _cache.move_to_end(key)
         return _cache[key]
     if ix["mat"] is None:
         return []
     qv = embed_query(q).astype(np.float32)
+    try:
+        qv, bonus, hidden = learn.personalize(q, qv)
+    except Exception:
+        traceback.print_exc()
+        bonus, hidden = {}, set()
     sims = np.empty(len(ix["mat"]), dtype=np.float32)
     for i in range(0, len(sims), 50000):
         sims[i:i + 50000] = ix["mat"][i:i + 50000].astype(np.float32) @ qv
@@ -439,8 +474,8 @@ def search(q):
     best = {}
     for j in order:
         pid = int(ix["post"][j])
-        if pid not in best:
-            best[pid] = (float(sims[j]), int(j))
+        if pid not in best and pid not in hidden:
+            best[pid] = (float(sims[j]) + bonus.get(pid, 0.0), int(j))
     scores = np.array([v[0] for v in best.values()])
     # broad cutoff: anything clearly above this library's typical score for the query
     cut = max(float(np.mean(scores) + 0.6 * np.std(scores)), float(np.max(scores)) - 0.12) if len(scores) > 5 else -1
@@ -461,7 +496,7 @@ def search(q):
             per_t[tk] = max(per_t.get(tk, -1.0), float(sims[k]))
         times = sorted(per_t)
         pos = times.index(float(ix["t"][j]))
-        while pos > 0 and per_t[times[pos - 1]] >= s - 0.03:
+        while pos > 0 and per_t[times[pos - 1]] >= float(sims[j]) - 0.03:
             pos -= 1
         out.append((pid, s, int(ix["idx"][j]), times[pos]))
     _cache[key] = out[:1500]

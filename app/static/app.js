@@ -144,7 +144,7 @@ const S = {
   inPt: null, outPt: null, settings: null, jobs: [], view: "frames", facets: null, queryImg: null,
 };
 const NAV_KEYS = ["collection", "tag", "creator", "kind", "favorite", "uncollected", "status", "trashed"];
-const LOOK_KEYS = ["content", "color", "tone", "sat", "temp", "contrast", "ar"];
+const LOOK_KEYS = ["tech", "content", "color", "tone", "sat", "temp", "contrast", "ar"];
 const CONTENT = [["film", "Film frames"], ["notfilm", "Not film frames"], ["talking", "Talking to camera"], ["bts", "Behind the scenes"], ["gear", "Gear & products"], ["text", "Text & graphics"]];
 const RANK_KEYS = ["similar", "simimg"];
 const LOOK = {
@@ -180,6 +180,7 @@ function setFilter(f, keepQuery = true) {
 // ---------------- sidebar ----------------
 async function loadSidebar() {
   api("/api/facets").then((f) => { S.facets = f; renderFilters(); }).catch(() => {});
+  if (!S.tech) api("/api/techniques").then((t) => { S.tech = t; renderFilters(); }).catch(() => {});
   api("/api/ai").then((a) => {
     S.aiOn = a.enabled && a.installed;
     $("#q").placeholder = S.aiOn ? "Search anything: flower, red neon, overhead table…" : "Captions, creators, tags, notes";
@@ -325,6 +326,17 @@ function renderFilters() {
     sel.onchange = () => updateFilter({ content: sel.value || null });
     return h("label", { class: "cell", title: "What each save shows, tagged by AI on your Mac" }, sel);
   })() : null;
+  const tc = fc.tech || {};
+  const techSel = S.tech && (Object.keys(tc).length || f.tech) ? (() => {
+    const sel = h("select", { class: f.tech ? "on" : "", "aria-label": "Technique" },
+      h("option", { value: "" }, "Technique"),
+      ...S.tech.groups.map((g) => {
+        const opts = S.tech.tags.filter((t) => t.group === g && (tc[t.tag] || f.tech === t.tag));
+        return opts.length ? h("optgroup", { label: g }, ...opts.map((t) => h("option", { value: t.tag, selected: f.tech === t.tag }, `${t.label}  ${pad(tc[t.tag] || 0)}`))) : null;
+      }));
+    sel.onchange = () => updateFilter({ tech: sel.value || null });
+    return h("label", { class: "cell", title: "Shot type, angle, look and camera movement, tagged on your Mac. Results start at the moment it shows up." }, sel);
+  })() : null;
   const selects = Object.entries(LOOK).map(([k, [label, opts]]) => {
     const counts = fc[k] || {};
     const sel = h("select", { class: f[k] ? "on" : "", "aria-label": label },
@@ -335,6 +347,7 @@ function renderFilters() {
   });
   const active = LOOK_KEYS.some((k) => f[k]);
   fill($("#filters"),
+    techSel,
     contentSel,
     h("div", { class: "cell" }, h("span", { class: "lbl" }, "Color"), sw),
     ...selects,
@@ -469,8 +482,17 @@ function tile(p, i, ratio) {
   }
   el.addEventListener("click", (e) => {
     if (e.shiftKey || e.metaKey || e.ctrlKey || S.selected.size) return toggleSelect(p.id, el, e.shiftKey ? i : null);
+    if (S.filter.q && S.aiOn) {
+      S.opened = S.opened || new Set();
+      const skipped = S.items.slice(Math.max(0, i - 12), i).filter((x) => !S.opened.has(x.id)).map((x) => x.id);
+      S.opened.add(p.id);
+      learnSignal("open", p, { skipped });
+    }
     openViewer(i);
   });
+  if (S.filter.q && S.aiOn) {
+    box.append(h("span", { class: "nomatch", role: "button", title: "Not what I searched for: hide it and teach search", onclick: (e) => { e.stopPropagation(); notAMatch(p); } }, "Not a match"));
+  }
   el.addEventListener("dragstart", (e) => e.dataTransfer.setData("text/stash-id", p.id));
   if (isVideo) {
     let v, timer;
@@ -511,6 +533,7 @@ async function loadMore() {
   });
 }
 function reload() {
+  S.opened = new Set();
   S.gen++; S.items = []; S.offset = 0; S.more = true; S.total = null; S.loading = false;
   layout(true); renderScope(); loadMore();
 }
@@ -578,6 +601,7 @@ function renderSelbar() {
     const v = input.value.trim();
     if (!v) return input.focus();
     await api("/api/posts/bulk", { method: "POST", body: v.startsWith("#") ? { ids: ids(), add_tags: [v.slice(1)] } : { ids: ids(), add_collections: [v] } });
+    learnSignal("keep", S.items.filter((x) => S.selected.has(x.id)));
     toast(`Added ${n} to <b>${esc(v)}</b>`); done();
   };
   input.addEventListener("keydown", (e) => { if (e.key === "Enter") add(); e.stopPropagation(); });
@@ -586,6 +610,7 @@ function renderSelbar() {
     ...(S.side?.boards || []).map((b) => h("option", { value: b.id }, b.name)));
   boards.onchange = async () => {
     const v = boards.value; boards.value = "";
+    if (v) learnSignal("keep", S.items.filter((x) => S.selected.has(x.id)));
     if (v === "__new") {
       const name = await askText("New moodboard", { value: S.filter.collection || "Untitled moodboard", label: "Create" });
       if (!name) return;
@@ -611,6 +636,25 @@ function renderSelbar() {
       done(); } }, "Trash"),
     h("span", { class: "grow" }),
     h("button", { onclick: clearSelection }, "Clear"));
+}
+
+// ---------------- search that learns ----------------
+// what you open, keep and reject after a search teaches it what you meant (stored on this Mac only)
+function learnSignal(signal, posts, extra = {}) {
+  const q = S.filter.q;
+  if (!q || !S.aiOn) return;
+  const list = (Array.isArray(posts) ? posts : [posts]).filter(Boolean);
+  if (!list.length) return;
+  if (list.length === 1) {
+    const p = list[0];
+    api("/api/feedback", { method: "POST", body: { q, signal, post_id: p.id, idx: p.hit?.idx || 0, t: p.hit?.t || 0, ...extra } }).catch(() => {});
+  } else api("/api/feedback", { method: "POST", body: { q, signal, post_ids: list.map((p) => p.id), ...extra } }).catch(() => {});
+}
+function notAMatch(p) {
+  learnSignal("notmatch", p);
+  const i = S.items.findIndex((x) => x.id === p.id);
+  if (i >= 0) { S.items.splice(i, 1); if (S.total) S.total--; layout(true); renderScope(); }
+  toast("Got it. Searches like this will leave it out and lean away from shots like it.");
 }
 
 // ---------------- viewer ----------------
@@ -641,6 +685,7 @@ function renderStage() {
   if (!m) { fill(frame, h("p", { class: "hint" }, "Media hasn't downloaded yet. It'll appear after the next sync.")); $("#deck").hidden = true; fill($("#slides"), ); return; }
   if (m.kind === "video") {
     const v = h("video", { src: m.src, poster: m.poster_src || m.thumb_src, playsinline: true, loop: true, preload: "auto" });
+    v.muted = !V.sound; v.defaultMuted = !V.sound;
     v.addEventListener("click", togglePlay);
     v.addEventListener("timeupdate", updateDeck);
     v.addEventListener("loadedmetadata", updateDeck);
@@ -667,6 +712,7 @@ function updateDeck() {
   $("#played").style.width = pct(v.currentTime);
   $("#tc").textContent = fmtTime(v.currentTime);
   $("#play").textContent = v.paused ? "Play" : "Pause";
+  $("#mute").textContent = v.muted ? "Unmute" : "Mute";
   const mi = $("#markIn"), mo = $("#markOut"), r = $("#range");
   mi.classList.toggle("on", S.inPt != null); mo.classList.toggle("on", S.outPt != null);
   if (S.inPt != null) mi.style.left = pct(S.inPt);
@@ -679,6 +725,13 @@ function updateDeck() {
   const range = $("#clipRange");
   if (range) range.textContent = `${fmtTime(a)} → ${fmtTime(b)} / ${(b - a).toFixed(1)}S`;
 }
+// videos open muted; once you unmute, sound stays on as you move between posts (until Stash is closed)
+function toggleMute() {
+  V.sound = !V.sound;
+  if (V.video) { V.video.muted = !V.sound; if (V.sound && V.video.paused) V.video.play().catch(() => {}); }
+  updateDeck();
+}
+$("#mute").onclick = toggleMute;
 function togglePlay() { const v = V.video; if (!v) return; v.paused ? v.play() : v.pause(); }
 function step(dir) { const v = V.video; if (!v) return; v.pause(); v.currentTime = Math.max(0, Math.min(v.duration, v.currentTime + dir / 30)); }
 function setIn() { if (!V.video) return; S.inPt = V.video.currentTime; if (S.outPt != null && S.outPt <= S.inPt) S.outPt = null; updateDeck(); }
@@ -818,6 +871,9 @@ function renderInfo() {
       m && m.palette ? h("button", { onclick: () => { closeViewer(); updateFilter({ color: m.palette.find(([hx]) => { const l = lumHex(hx); return l > 0.12 && l < 0.92; })?.[0] || m.palette[0][0] }); } }, "Same color") : null),
     cap, capMore,
     ...sections,
+    m && (S.aiOn || m.techniques?.length) ? techSection(p, m) : null,
+    S.filter.q && S.aiOn && S.items[S.viewerIndex]?.id === p.id ? h("div", { class: "cells" },
+      h("button", { onclick: () => { const it = S.items[S.viewerIndex]; closeViewer(); notAMatch(it); } }, `Not a match for “${S.filter.q}”`)) : null,
     h("section", {}, h("h4", {}, "Collections"), chipList(p.collections, "col"), adder("Add to collection", "col")),
     h("section", {}, h("h4", {}, "Tags"), chipList(p.tags || [], "tag"), adder("Add tags, comma separated", "tag")),
     h("section", {}, h("h4", {}, "Notes"), notes),
@@ -834,6 +890,27 @@ function renderInfo() {
       h("button", { onclick: () => openViewer(S.viewerIndex + 1), disabled: S.viewerIndex >= total - 1 }, "Next")),
   );
   updateDeck();
+}
+
+function techSection(p, m) {
+  const tags = m.techniques || [];
+  const refresh = async () => { S.post = await api(`/api/posts/${p.id}`); renderInfo(); loadSidebar(); };
+  const set = async (tag, on) => {
+    await api(`/api/media/${m.id}/technique`, { method: "POST", body: { tag, on } });
+    toast(on ? "Added. Shots that look like this one will pick it up too." : "Removed. Stash won't tag this one again, and leans away from it for look-alikes.");
+    refresh();
+  };
+  const add = h("select", { "aria-label": "Add a technique" }, h("option", { value: "" }, "+ Add technique"),
+    ...(S.tech?.groups || []).map((g) => h("optgroup", { label: g },
+      ...S.tech.tags.filter((t) => t.group === g && !tags.some((x) => x.tag === t.tag)).map((t) => h("option", { value: t.tag }, t.label)))));
+  add.onchange = () => { if (add.value) set(add.value, true); };
+  const how = { ai: "Tagged by AI", motion: "Measured from the camera movement", learned: "Learned from shots you tagged", user: "Added by you" };
+  return h("section", {}, h("h4", {}, "Technique"),
+    h("div", { class: "chips" }, ...tags.map((t) => h("span", { class: "chip tech " + t.source, title: how[t.source] || "" },
+      h("button", { class: "link", onclick: () => { closeViewer(); updateFilter({ tech: t.tag }); } }, t.label + (t.source === "user" ? "" : t.source === "learned" ? " ·" : "")),
+      h("button", { class: "x", title: "Not this: remove", "aria-label": "Remove " + t.label, onclick: () => set(t.tag, false) }, "×"))),
+      tags.length ? null : h("span", { class: "hint" }, S.aiOn ? "Nothing tagged yet." : "")),
+    h("div", { class: "opts" }, add));
 }
 
 // ---------------- settings / sync drawer ----------------
@@ -1024,8 +1101,18 @@ function renderDrawer(focus) {
     const line = a.downloading ? `Downloading model… ${Math.round(a.progress * 100)}%`
       : a.enabled && a.installed ? `Scanned ${a.scanned.toLocaleString()} of ${a.total.toLocaleString()} images and videos` + (a.scanned < a.total ? " (keeps going in the background, search improves as it goes)" : ". Search looks inside everything.")
       : "Off";
+    const learnLine = h("div", { class: "hint" });
+    api("/api/techniques").then((t) => {
+      const l = t.learned;
+      learnLine.textContent = l.signals || l.tags ? `Learning from you: ${l.signals} picks and passes across ${l.searches} searches, ${l.tags} technique tags you set.` : "Search learns from what you open, keep, and mark “Not a match”.";
+    }).catch(() => {});
     fill(aiBody,
       h("div", { class: "stat-line" }, line),
+      a.enabled && a.installed ? learnLine : null,
+      a.enabled && a.installed ? h("button", { class: "ghost", onclick: async () => {
+        if (!(await askConfirm("Reset what search has learned?", { text: "Searches go back to the AI on its own. Technique tags you set by hand stay.", label: "Reset", danger: true }))) return;
+        await api("/api/feedback", { method: "POST", body: { signal: "reset" } }); toast("Search learning reset"); loadAI();
+      } }, "Reset learning") : null,
       a.error ? h("p", { style: "color:var(--danger)" }, a.error) : null,
       a.enabled && (a.installed || a.downloading)
         ? h("button", { onclick: async () => { await api("/api/ai/toggle", { method: "POST", body: { enabled: false } }); loadAI(); } }, "Turn off")
@@ -1119,18 +1206,20 @@ document.addEventListener("keydown", (e) => {
   if (!$("#viewer").hidden) {
     if (typing) { if (e.key === "Escape") document.activeElement.blur(); return; }
     const k = e.key.toLowerCase();
-    if (k === "escape") closeViewer();
-    else if (k === "arrowright") openViewer(S.viewerIndex + 1);
-    else if (k === "arrowleft") openViewer(S.viewerIndex - 1);
-    else if (k === " ") { e.preventDefault(); togglePlay(); }
-    else if (k === "i") setIn();
-    else if (k === "o") setOut();
-    else if (k === "g") grabFrame();
-    else if (k === ",") step(-1);
-    else if (k === ".") step(1);
-    else if (k === "f" && S.post) $(".fav-btn")?.click();
-    else if (k === "arrowdown" && S.post?.media.length > 1) { e.preventDefault(); S.slide = (S.slide + 1) % S.post.media.length; renderStage(); renderInfo(); }
-    else if (k === "arrowup" && S.post?.media.length > 1) { e.preventDefault(); S.slide = (S.slide - 1 + S.post.media.length) % S.post.media.length; renderStage(); renderInfo(); }
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const multi = S.post?.media.length > 1;
+    const keys = {
+      escape: closeViewer,
+      arrowright: () => { if (S.viewerIndex < S.items.length - 1) openViewer(S.viewerIndex + 1); },
+      arrowleft: () => { if (S.viewerIndex > 0) openViewer(S.viewerIndex - 1); },
+      " ": togglePlay, i: setIn, o: setOut, g: grabFrame, m: toggleMute,
+      ",": () => step(-1), ".": () => step(1),
+      f: () => S.post && $(".fav-btn")?.click(),
+      arrowdown: () => { if (multi) { S.slide = (S.slide + 1) % S.post.media.length; renderStage(); renderInfo(); } },
+      arrowup: () => { if (multi) { S.slide = (S.slide - 1 + S.post.media.length) % S.post.media.length; renderStage(); renderInfo(); } },
+    };
+    // claim every key we use, even at the first/last post: an unclaimed key makes the Mac play its "can't do that" sound
+    if (keys[k]) { e.preventDefault(); keys[k](); }
     return;
   }
   if (typing) { if (e.key === "Escape") document.activeElement.blur(); return; }

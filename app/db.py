@@ -107,6 +107,17 @@ CREATE VIRTUAL TABLE IF NOT EXISTS search USING fts5(
     username, caption, notes, tags, collections,
     tokenize = 'unicode61 remove_diacritics 2'
 );
+CREATE TABLE IF NOT EXISTS techniques (
+    media_id INTEGER NOT NULL REFERENCES media(id) ON DELETE CASCADE,
+    tag TEXT NOT NULL, score REAL, t REAL DEFAULT 0, source TEXT NOT NULL,
+    PRIMARY KEY (media_id, tag)
+);
+CREATE INDEX IF NOT EXISTS techniques_tag ON techniques(tag, source);
+CREATE TABLE IF NOT EXISTS feedback (
+    id INTEGER PRIMARY KEY, q TEXT NOT NULL, post_id INTEGER NOT NULL, idx INTEGER DEFAULT 0, t REAL DEFAULT 0,
+    signal TEXT NOT NULL, weight REAL NOT NULL, at INTEGER
+);
+CREATE INDEX IF NOT EXISTS feedback_q ON feedback(q);
 CREATE TABLE IF NOT EXISTS boards (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
@@ -178,7 +189,8 @@ def init():
         c.execute("CREATE INDEX IF NOT EXISTS posts_deleted ON posts(deleted_at)")
         acols = {r[1] for r in c.execute("PRAGMA table_info(analysis)")}
         for col, typ in (("content", "TEXT"), ("content_conf", "REAL"), ("clip", "BLOB"),
-                         ("ai_version", "INTEGER"), ("content_user", "TEXT"), ("scan_version", "INTEGER")):
+                         ("ai_version", "INTEGER"), ("content_user", "TEXT"), ("scan_version", "INTEGER"),
+                         ("tech_version", "INTEGER")):
             if col not in acols:
                 c.execute(f"ALTER TABLE analysis ADD COLUMN {col} {typ}")
         c.commit()
