@@ -154,7 +154,10 @@ def frame_scores(vec):
 # Each tag's prompts have their own bias (some score high on almost anything), so a frame only gets a tag
 # when it stands out from the rest of *your* library on that measure, as well as clearing a floor.
 Z_BINARY, Z_EXCLUSIVE = 2.0, 1.5
-FLOOR_BINARY, FLOOR_EXCLUSIVE = 0.8, 0.5
+FLOOR_BINARY, FLOOR_EXCLUSIVE = 0.9, 0.55
+# framing / angle / look describe footage: text graphics, gear shots and talking heads only get these
+ANY_CONTENT = {"typography", "split_screen"}
+NOT_FOOTAGE = {"text", "gear", "talking"}
 _stats = {"n": -1}
 
 
@@ -371,6 +374,10 @@ def tag_media(r):
     c = db.conn()
     times, vecs = frame_matrix(c, r["id"])
     found = frame_tags(times, vecs)
+    label = c.execute("SELECT COALESCE(a.content_user, a.content) FROM media m JOIN media cm ON cm.post_id=m.post_id AND cm.idx=0 "
+                      "JOIN analysis a ON a.media_id=cm.id WHERE m.id=?", (r["id"],)).fetchone()
+    if label and label[0] in NOT_FOOTAGE:
+        found = {k: v for k, v in found.items() if k in ANY_CONTENT}
     mot = {}
     if r["kind"] == "video":
         src = db.media_path(r["path"])

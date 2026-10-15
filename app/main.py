@@ -657,6 +657,8 @@ async def set_content(request):
         c.execute("INSERT INTO analysis (media_id, version) VALUES (?, 0) ON CONFLICT(media_id) DO NOTHING", (mid,))
         c.execute("UPDATE analysis SET content_user=? WHERE media_id=?", (val, mid))
         c.execute("UPDATE analysis SET ai_version=0 WHERE content_user IS NULL")   # re-tag the rest using your correction
+        c.execute("UPDATE analysis SET tech_version=0 WHERE media_id IN "
+                  "(SELECT id FROM media WHERE post_id=(SELECT post_id FROM media WHERE id=?))", (mid,))
     return JSONResponse({"ok": True})
 
 

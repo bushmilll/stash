@@ -173,6 +173,8 @@ def run(port):
             tc = techniques.frame_tags([0.0], v1[None])
             techniques._stats.update(n=-1)
             check("AI technique tags run", isinstance(tf, dict) and isinstance(tc, dict))
+            kept = {k for k in tc if k in techniques.ANY_CONTENT} if l1 in techniques.NOT_FOOTAGE else set(tc)
+            check("AI: text card gets no camera/look tags", not (kept - techniques.ANY_CONTENT), f"{l1}: {sorted(kept)}")
             if on_ci:
                 print(f"::notice title=Technique tags::silhouette frame -> {sorted(tf)}; text card -> {sorted(tc)}", flush=True)
                 fw = ai.embed_image(tmp / "b.png")
