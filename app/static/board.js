@@ -3,12 +3,14 @@
    Loaded after app.js and shares its helpers ($, h, api, fill, toast, modal, downloadUrl, esc, pad). */
 const Board = (() => {
   const W = 1600;            // logical board width; export scales this up
-  const MARGIN = 48;
+  const MARGIN_DEFAULT = 48;
+  const MARGIN = () => (st && st.margin != null ? st.margin : MARGIN_DEFAULT);   // space around the edges (0 = images to the edge)
+  const TITLE_IN = () => Math.max(MARGIN(), 28);   // the title keeps a little air even at zero margin
   const NUM_SPACE = 30;      // room under a numbered cell for its [01] label
   const TITLE_SIZE = 64, CAP_SIZE = 11;
   const SWATCHES = [["#eceae5", "Paper"], ["#ffffff", "White"], ["#8c8a84", "Concrete"], ["#1a1a1a", "Graphite"], ["#000000", "Black"]];
   const DEFAULTS = { layout: "sheet", show_title: true, title_pos: "top", captions: "full", numbered: true, tile_ar: "orig",
-    fill: false, tilt: false, video_labels: false, motion: true, size: "free", pages: "flow", rows: 0, cols: 0 };
+    fill: false, tilt: false, video_labels: false, motion: true, size: "free", pages: "flow", rows: 0, cols: 0, margin: 48 };
   const TILE = { orig: 1.25, "1:1": 1, "3:2": 2 / 3, "16:9": 9 / 16, "9:16": 16 / 9 };   // cell height / width
   const HINTS = {
     structured: "Drag a post onto another to swap / click a video to loop it / Delete removes / ⌘Z undo",
@@ -101,10 +103,10 @@ const Board = (() => {
     else if (r > 1.5) cols = n <= 4 ? n : n <= 12 ? 6 : 8;                  // tall tiles: more per row
     const g = Math.max(B.gap, 8), ns = st.numbered ? NUM_SPACE : 0;
     const maxW = r > 1.5 ? 420 : r < 1 ? 760 : 640;
-    const cw = Math.min(maxW, (W - 2 * MARGIN - (cols - 1) * g) / cols), ch = cw * r;
+    const cw = Math.min(maxW, (W - 2 * MARGIN() - (cols - 1) * g) / cols), ch = cw * r;
     ms.forEach((it, i) => {
       const c = i % cols, row = Math.floor(i / cols);
-      v.media.set(it, { x: MARGIN + c * (cw + g), y: y0 + row * (ch + ns + g), w: cw, h: ch, cell: true, fit: !st.fill, num: st.numbered ? (o.numBase || 0) + i + 1 : null });
+      v.media.set(it, { x: MARGIN() + c * (cw + g), y: y0 + row * (ch + ns + g), w: cw, h: ch, cell: true, fit: !st.fill, num: st.numbered ? (o.numBase || 0) + i + 1 : null });
     });
     return y0 + Math.ceil(ms.length / cols) * (ch + ns + g) - g;
   }
@@ -112,7 +114,7 @@ const Board = (() => {
   function layoutMasonry(ms, y0, v) {
     const n = ms.length;
     const cols = Math.max(1, Math.min(n, st.cols || autoCols(n)));
-    const g = B.gap, cw = Math.min(900, (W - 2 * MARGIN - (cols - 1) * g) / cols);
+    const g = B.gap, cw = Math.min(900, (W - 2 * MARGIN() - (cols - 1) * g) / cols);
     const colsItems = Array.from({ length: cols }, () => []), hs = new Array(cols).fill(0);
     for (const it of ms) {
       let c = 0; for (let j = 1; j < cols; j++) if (hs[j] < hs[c] - 0.5) c = j;
@@ -132,7 +134,7 @@ const Board = (() => {
       const natural = list.reduce((a, it) => a + cw * ratio(it), 0), gaps = (list.length - 1) * g;
       const f = (T - gaps) / natural;
       let y = y0;
-      for (const it of list) { const hh = cw * ratio(it) * f; v.media.set(it, { x: MARGIN + c * (cw + g), y, w: cw, h: hh }); y += hh + g; }
+      for (const it of list) { const hh = cw * ratio(it) * f; v.media.set(it, { x: MARGIN() + c * (cw + g), y, w: cw, h: hh }); y += hh + g; }
       end = Math.max(end, y - g);
     });
     return end;
@@ -153,13 +155,13 @@ const Board = (() => {
     return rows;
   }
   function layoutRows(ms, y0, v) {
-    const n = ms.length, g = B.gap, avail = W - 2 * MARGIN;
+    const n = ms.length, g = B.gap, avail = W - 2 * MARGIN();
     const R = Math.max(1, Math.min(n, st.rows || autoRows(n)));
     let y = y0;
     for (const [a, b] of partition(ms.map((it) => 1 / ratio(it)), R)) {
       const row = ms.slice(a, b); if (!row.length) continue;
       const rh = (avail - (row.length - 1) * g) / row.reduce((s_, it) => s_ + 1 / ratio(it), 0);
-      let x = MARGIN;
+      let x = MARGIN();
       for (const it of row) { const w = rh / ratio(it); v.media.set(it, { x, y, w, h: rh }); x += w + g; }
       y += rh + g;
     }
@@ -183,13 +185,13 @@ const Board = (() => {
   function genCollage(list, base) {
     const n = list.length; if (!n) return;
     const cols = n === 1 ? 1 : n <= 4 ? n : Math.max(3, Math.min(7, Math.round(Math.sqrt(n * 1.8))));
-    const cell = (W - 2 * MARGIN) / cols;
+    const cell = (W - 2 * MARGIN()) / cols;
     const ys = Array.from({ length: cols }, () => base + rand(0, cell * 0.22));
     let z = Math.max(0, ...media().map((i) => i.z || 0));
     for (const it of list) {
       let c = 0; for (let j = 1; j < cols; j++) if (ys[j] < ys[c]) c = j;
-      const w = Math.min(cell * rand(1.0, 1.22), W - 2 * MARGIN, 760), hh = w * ratio(it);
-      const x = Math.max(MARGIN * 0.5, Math.min(W - MARGIN * 0.5 - w, MARGIN + c * cell + (cell - w) / 2 + rand(-0.08, 0.08) * cell));
+      const w = Math.min(cell * rand(1.0, 1.22), W - 2 * MARGIN(), 760), hh = w * ratio(it);
+      const x = Math.max(MARGIN() * 0.5, Math.min(W - MARGIN() * 0.5 - w, MARGIN() + c * cell + (cell - w) / 2 + rand(-0.08, 0.08) * cell));
       const y = ys[c] <= base + cell * 0.22 ? ys[c] : Math.max(base, ys[c] - rand(0.04, 0.12) * Math.min(hh, cell)); // tuck under the piece above
       Object.assign(it, { cx: Math.round(x), cy: Math.round(y), cw: Math.round(w), ch: Math.round(hh), rot: st.tilt ? tiltAngle() : 0, z: ++z });
       ys[c] = y + hh;
@@ -223,7 +225,7 @@ const Board = (() => {
   function captionsFor(ms, y, v, numBase, pageKey) {
     const n = ms.length, full = st.captions === "full";
     const listCols = Math.min(6, Math.max(2, Math.ceil(n / (full ? 4 : 8))));
-    const lw = (W - 2 * MARGIN - (listCols - 1) * 24) / listCols, per = Math.ceil(n / listCols);
+    const lw = (W - 2 * MARGIN() - (listCols - 1) * 24) / listCols, per = Math.ceil(n / listCols);
     let end = y;
     for (let k = 0; k < listCols; k++) {
       const chunk = ms.slice(k * per, (k + 1) * per);
@@ -236,7 +238,7 @@ const Board = (() => {
         return `${num}${who}${cap ? "\n" + (cap.length > 64 ? cap.slice(0, 62) + "…" : cap) : ""}`;
       }).join(full ? "\n\n" : "\n");
       const key = "cap" + pageKey + "_" + k;
-      v.texts.push({ key, text, x: MARGIN + k * (lw + 24), y, w: lw, size: CAP_SIZE, mono: true });
+      v.texts.push({ key, text, x: MARGIN() + k * (lw + 24), y, w: lw, size: CAP_SIZE, mono: true });
       end = Math.max(end, y + (heights[key] ?? chunk.length * (full ? 4 : 1) * CAP_SIZE * 1.3));
     }
     return end;
@@ -249,17 +251,17 @@ const Board = (() => {
     const v = { media: new Map(), texts: [], pages: [] };
     const ms = media();
     const titleH = heights.title ?? TITLE_SIZE * 1.12;
-    const title = (y) => ({ key: "title", title: true, text: B.name || "Untitled moodboard", x: MARGIN, y, w: W - 2 * MARGIN, size: TITLE_SIZE });
+    const title = (y) => ({ key: "title", title: true, text: B.name || "Untitled moodboard", x: TITLE_IN(), y, w: W - 2 * TITLE_IN(), size: TITLE_SIZE });
     const top = st.show_title && st.title_pos !== "bottom";
     if (SIZES[st.size]) { computePaged(v, ms, title, titleH, top); return v; }
-    let y = MARGIN;
-    if (top) { v.texts.push(title(y)); y += titleH + 36; }
+    let y = MARGIN();
+    if (top) { v.texts.push(title(TITLE_IN())); y = TITLE_IN() + titleH + 36; }
     v.y0 = y;
     let end = ms.length ? LAYOUTS[st.layout](ms, y, v) : y;
     if (st.layout === "sheet" && st.captions !== "off" && ms.length) end = captions(ms, end + 48, v);
-    if (st.show_title && !top) { const ty = end + (ms.length ? 56 : 0); v.texts.push(title(ty)); end = ty + titleH; }
+    if (st.show_title && !top) { const ty = end + (ms.length ? 56 : 0); v.texts.push(title(ty)); end = ty + titleH + (TITLE_IN() - MARGIN()); }
     const noteEnd = notes().filter((it) => it.x != null).map((it) => it.y + (it._h || it.size * 1.3));
-    v.H = Math.max(900, end + MARGIN, ...noteEnd.map((b) => b + MARGIN));
+    v.H = Math.max(MARGIN() ? 900 : 300, end + MARGIN(), ...noteEnd.map((b) => b + MARGIN()));
     v.pages = [{ top: 0, h: v.H }];
     return v;
   }
@@ -277,7 +279,7 @@ const Board = (() => {
   function computePaged(v, ms, title, titleH, top) {
     const PH = Math.round(W * SIZES[st.size]);
     const bottomTitle = st.show_title && !top;
-    const area = (first, last) => PH - 2 * MARGIN - (first && top ? titleH + 32 : 0) - (last && bottomTitle ? titleH + 32 : 0);
+    const area = (first, last) => PH - 2 * MARGIN() - (first && top ? titleH + 32 + Math.max(0, TITLE_IN() - MARGIN()) : 0) - (last && bottomTitle ? titleH + 32 + Math.max(0, TITLE_IN() - MARGIN()) : 0);
     // which posts go on which slide
     const chunks = [];
     if (st.pages === "fit" || st.layout === "collage" || !ms.length) chunks.push(ms);
@@ -308,21 +310,21 @@ const Board = (() => {
       const first = pi === 0, last = pi === chunks.length - 1;
       const pageTop = pi * (PH + PAGE_GAP);
       v.pages.push({ top: pageTop, h: PH });
-      let y = pageTop + MARGIN;
-      if (first && top) { v.texts.push(title(y)); y += titleH + 32; }
+      let y = pageTop + MARGIN();
+      if (first && top) { v.texts.push(title(pageTop + TITLE_IN())); y = pageTop + TITLE_IN() + titleH + 32; }
       const avail = area(first, last);
       const sb = sandbox(chunk, base, "p" + pi);
       const sc = sb.h > avail ? avail / sb.h : 1;     // shrink to fit when needed, centred across
-      const dx = (W - 2 * MARGIN) * (1 - sc) / 2;
+      const dx = (W - 2 * MARGIN()) * (1 - sc) / 2;
       const dy = st.layout === "sheet" || sc < 1 ? 0 : (avail - sb.h) / 2;
-      const tx = (x) => MARGIN + (x - MARGIN) * sc + dx, ty = (yy) => y + dy + yy * sc;
+      const tx = (x) => MARGIN() + (x - MARGIN()) * sc + dx, ty = (yy) => y + dy + yy * sc;
       for (const [it, p] of sb.media) v.media.set(it, { ...p, x: tx(p.x), y: ty(p.y), w: p.w * sc, h: p.h * sc, page: pi });
       for (const t of sb.texts) v.texts.push({ ...t, x: tx(t.x), y: ty(t.y), w: t.w * sc, size: t.size * sc, _sc: sc });
-      if (st.layout === "collage") v.cs = { s: sc, ox: dx + MARGIN * (1 - sc), oy: y + dy };
-      if (last && bottomTitle) v.texts.push(title(pageTop + PH - MARGIN - titleH));
+      if (st.layout === "collage") v.cs = { s: sc, ox: dx + MARGIN() * (1 - sc), oy: y + dy };
+      if (last && bottomTitle) v.texts.push(title(pageTop + PH - TITLE_IN() - titleH));
       base += chunk.length;
     });
-    v.y0 = MARGIN + (top ? titleH + 32 : 0);
+    v.y0 = MARGIN() + (top ? titleH + 32 : 0);
     v.H = chunks.length * PH + (chunks.length - 1) * PAGE_GAP;
   }
   // ---------- rendering (elements are kept and moved, so swaps and reflows animate) ----------
@@ -558,6 +560,7 @@ const Board = (() => {
     on("[data-vl]", st.video_labels ? "1" : "0");
     on("[data-motion]", st.motion ? "1" : "0");
     on("[data-pages]", st.pages);
+    $("#boardMargin").value = st.margin ?? MARGIN_DEFAULT;
     document.querySelectorAll("[data-only]").forEach((g) => { g.hidden = !g.dataset.only.split(" ").includes(st.layout); });
     $("#pagesCtl").hidden = !SIZES[st.size] || st.layout === "collage";
     if (sizePick) sizePick.value = st.size;
@@ -665,7 +668,7 @@ const Board = (() => {
     }, { once: true });
   }
   function addNote() {
-    const it = { type: "text", text: "Note", x: MARGIN, y: Math.max(MARGIN, Math.round($("#boardScroll").scrollTop / scale) + 200), w: 520, size: 28, z: 0 };
+    const it = { type: "text", text: "Note", x: MARGIN(), y: Math.max(MARGIN(), Math.round($("#boardScroll").scrollTop / scale) + 200), w: 520, size: 28, z: 0 };
     B.items.push(it); toFront(it); render(); select(it);
     const el = els.get(it); if (el) edit(el);
     save();
@@ -889,6 +892,7 @@ const Board = (() => {
     document.querySelectorAll("[data-motion]").forEach((b) => { b.onclick = () => set({ motion: b.dataset.motion === "1" }); });
     document.querySelectorAll("[data-layer]").forEach((b) => { b.onclick = () => restack(selected, b.dataset.layer); });
     $("#boardShuffle").onclick = shuffle;
+    $("#boardMargin").oninput = () => { set({ margin: Number($("#boardMargin").value) }); };
     $("#boardGap").oninput = () => { B.gap = Number($("#boardGap").value); render(); save(); };
     $("#addNote").onclick = addNote;
     $("#boardTitle").onchange = () => { B.name = $("#boardTitle").value.trim() || B.name; render(); save(); };

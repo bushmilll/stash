@@ -487,7 +487,7 @@ code { font-family: var(--mono); font-size: var(--fs-xs); background: var(--cell
 .dropzone div { border: 2px dashed var(--paper); color: var(--paper); padding: 40px 56px; font-size: 22px; font-weight: 500; text-transform: uppercase; letter-spacing: -.01em; background: rgba(0,0,0,.4); }
 
 /* search: where the match is */
-.hitchip { position: absolute; left: 30px; top: 6px; z-index: 3; background: var(--signal); color: #000; font: 500 10px var(--mono); padding: 2px 5px; pointer-events: none; }
+.hitchip { position: absolute; left: 26px; top: 6px; z-index: 3; background: var(--signal); color: #000; font: 500 10px var(--mono); padding: 2px 5px; pointer-events: none; }
 
 /* search learning + techniques */
 .tile .nomatch { position: absolute; right: 6px; top: 6px; background: #000; color: #fff; font: 400 10px var(--mono); text-transform: uppercase; padding: 2px 6px; display: none; z-index: 6; cursor: pointer; }
@@ -585,10 +585,10 @@ code { font-family: var(--mono); font-size: var(--fs-xs); background: var(--cell
 .filters .analyzing { flex-shrink: 0; align-self: center; padding: 0 12px; }
 
 /* select box on tiles (shows on hover, stays while anything is selected) */
-.tile .selbox { position: absolute; left: 6px; top: 6px; width: 16px; height: 16px; border: 1.5px solid #fff; background: rgba(0,0,0,.35); z-index: 6; display: none; cursor: pointer; box-shadow: 0 0 0 1px rgba(0,0,0,.4); }
+.tile .selbox { position: absolute; left: 6px; top: 6px; width: 13px; height: 13px; border: 1.5px solid #fff; background: rgba(0,0,0,.35); z-index: 6; display: none; cursor: pointer; box-shadow: 0 0 0 1px rgba(0,0,0,.4); }
 .tile:hover .selbox, .grid.selecting .tile .selbox, .tile.sel .selbox { display: block; }
 .tile.sel .selbox { background: var(--signal); border-color: var(--signal); }
-.tile.sel .selbox::after { content: ""; position: absolute; left: 4px; top: 0px; width: 4px; height: 9px; border: solid #000; border-width: 0 2px 2px 0; transform: rotate(45deg); }
+.tile.sel .selbox::after { content: ""; position: absolute; left: 3px; top: 0px; width: 3px; height: 7px; border: solid #000; border-width: 0 2px 2px 0; transform: rotate(45deg); }
 
 /* moodboard slides */
 .paper.paged { outline: 0; }
@@ -596,3 +596,28 @@ code { font-family: var(--mono); font-size: var(--fs-xs); background: var(--cell
 .page-no { position: absolute; left: 0; bottom: 100%; margin-bottom: 14px; font: 400 22px var(--mono); color: var(--ink-3); text-transform: uppercase; white-space: nowrap; }
 .board-opts .tc { font-family: var(--mono); font-size: var(--fs-xs); min-width: 16px; }
 .board-opts .menu-cell .pick { font-size: var(--fs-s); }
+
+/* filter bar: "spec sheet" look (scoped to .fbar-a, so dropping that class brings back the previous bar) */
+.filters.fbar-a .fhead { display: flex; align-items: center; flex-shrink: 0; padding: 0 14px 0 var(--pad); font: 400 10.5px var(--mono); letter-spacing: .04em; color: var(--ink-3); text-transform: uppercase; }
+.filters.fbar-a .menu-cell { border-left: 1px solid var(--rule-soft); }
+.filters.fbar-a .menu-cell.gstart { border-left: 1px solid var(--ink); }
+.filters.fbar-a .menu-cell:first-of-type .pick { padding-left: 14px; }
+.filters.fbar-a .pick { font-family: var(--mono); font-size: 10.5px; letter-spacing: .04em; gap: 8px; padding: 0 14px; font-weight: 400; }
+.filters.fbar-a .pick .lbl { color: var(--ink); }
+.filters.fbar-a .pick .caret { width: 5px; height: 5px; border-width: 0 1.2px 1.2px 0; opacity: .55; margin-left: 1px; }
+.filters.fbar-a .pick.on { background: none; color: var(--ink); }
+.filters.fbar-a .pick.on .lbl { color: var(--ink-3); opacity: 1; }
+.filters.fbar-a .pick .pv { color: var(--ink); border-bottom: 1.5px solid var(--signal); padding-bottom: 1px; max-width: 150px; }
+.filters.fbar-a .pick .pv.mono-hex { border-bottom: 0; }
+.filters.fbar-a .pick:hover, .filters.fbar-a .pick.open { background: var(--cell); color: var(--ink); }
+.filters.fbar-a .pick:hover .lbl, .filters.fbar-a .pick.open .lbl { color: var(--ink); opacity: 1; }
+.filters.fbar-a .pick.on:hover .lbl, .filters.fbar-a .pick.on.open .lbl { color: var(--ink-3); }
+.filters.fbar-a .fres { display: flex; align-items: center; flex-shrink: 1; min-width: 0; overflow: hidden; white-space: nowrap; padding: 0 var(--pad); font: 400 10.5px var(--mono); letter-spacing: .04em; color: var(--ink-3); text-transform: uppercase; }
+.filters.fbar-a .clear-cell { font: 400 10.5px var(--mono); letter-spacing: .04em; text-transform: uppercase; border-left: 1px solid var(--rule-soft); padding: 0 var(--pad); }
+.filters.fbar-a .clear-cell:hover { background: var(--ink); color: var(--paper); }
+.chip-swatch.rainbow { background: conic-gradient(#ff3b30, #ff9500, #ffcc00, #34c759, #00c7be, #007aff, #5856d6, #ff2d55, #ff3b30); }
+.chip-swatch { width: 13px; height: 13px; }
+.color-pop .hex-row { display: flex; gap: 0; border: 1px solid var(--rule); }
+.color-pop .hex-in { flex: 1; min-width: 0; border: 0; padding: 6px 8px; font: 400 12px var(--mono); text-transform: uppercase; background: none; }
+.color-pop .hex-in.bad { color: var(--danger); }
+.color-pop .hex-row .menu-clear { border-left: 1px solid var(--rule); }

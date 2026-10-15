@@ -407,6 +407,8 @@ async function dropInto(name, e) {
 
 // ---------------- scope header ----------------
 function renderScope() {
+  const fres = document.querySelector("#filters .fres");
+  if (fres) fres.textContent = S.total != null ? `${pad(S.total)} results` : "";
   const f = S.filter;
   let title = "Everything";
   if (f.collection) title = f.collection;
@@ -501,36 +503,56 @@ function renderFilters() {
   const counts = (k) => fc[k] || {};
   const aspectOpts = LOOK.ar[1].filter(([v]) => counts("ar")[v] || (f.ar || "").split(",").includes(v)).map(([v, l]) => ({ value: v, label: l, count: counts("ar")[v] || 0 }));
   const active = LOOK_KEYS.some((k) => f[k]);
-  fill($("#filters"),
+  const res = h("span", { class: "fres" }, S.total != null ? `${pad(S.total)} results` : "");
+  const filters = $("#filters");
+  filters.classList.add("fbar-a");   // the "spec sheet" look; remove this class to go back to the previous bar
+  fill(filters,
+    h("span", { class: "fhead" }, "Filter"),
     menu("Content", "content", CONTENT.map(([v, l]) => ({ value: v, label: l, count: v === "notfilm" ? ccTotal - (cc.film || 0) : cc[v] || 0 })), { title: "What each save shows, tagged by AI on your Mac" }),
     menu("Aspect", "ar", aspectOpts),
-    techMenu("Frame Size"), techMenu("Shot Type"), techMenu("Composition"), techMenu("Movement"),
-    lookMenu,
+    gstart(techMenu("Frame Size")), techMenu("Shot Type"), techMenu("Composition"), techMenu("Movement"),
+    gstart(lookMenu),
     menu("Temperature", "temp", lookOpts("temp").map((o) => ({ value: o.v, label: o.l, count: o.count }))),
     cell(colorButton()),
     h("span", { class: "spacer" }),
     fc.pending ? h("span", { class: "analyzing" }, `Analyzing ${fc.pending}…`) : null,
+    res,
     active ? h("button", { class: "cell clear-cell", onclick: () => updateFilter(Object.fromEntries(LOOK_KEYS.map((k) => [k, null]))) }, "Clear") : null);
   reattachMenu($("#filters"));
 }
-// Color: one button that opens the swatches
+const gstart = (el) => { el.classList.add("gstart"); return el; };   // a heavier rule between groups of filters
+// Color: one button that opens the swatches (a rainbow square until a color is picked)
 function colorButton() {
   const f = S.filter;
   const btn = h("button", { type: "button", class: "pick compact" + (f.color ? " on" : ""), "data-menu-key": "color", title: "Frames featuring a color" },
-    h("span", { class: "lbl" }, "Color"), f.color ? h("span", { class: "chip-swatch", style: `background:${f.color}` }) : null, h("span", { class: "caret" }));
+    h("span", { class: "lbl" }, "Color"),
+    h("span", { class: "chip-swatch" + (f.color ? "" : " rainbow"), style: f.color ? `background:${f.color}` : "" }),
+    f.color ? h("span", { class: "pv mono-hex" }, f.color.toUpperCase()) : null,
+    h("span", { class: "caret" }));
   btn._open = () => {
     closeMenu();
     const custom = h("input", { type: "color", value: f.color || "#c89723", title: "Pick any color", "aria-label": "Pick any color" });
     custom.onchange = () => { closeMenu(); updateFilter({ color: custom.value }); };
+    // or type a hex code
+    const hex = h("input", { type: "text", class: "hex-in", placeholder: "#HEX", value: f.color ? f.color.toUpperCase() : "", maxlength: 7, spellcheck: "false", "aria-label": "Hex color" });
+    const applyHex = () => {
+      let v = hex.value.trim().replace(/^#?/, "#");
+      if (/^#[0-9a-f]{3}$/i.test(v)) v = "#" + [...v.slice(1)].map((c) => c + c).join("");
+      if (!/^#[0-9a-f]{6}$/i.test(v)) { hex.classList.add("bad"); return; }
+      closeMenu(); updateFilter({ color: v.toLowerCase() });
+    };
+    hex.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Enter") applyHex(); if (e.key === "Escape") closeMenu(); hex.classList.remove("bad"); });
     const pop = h("div", { class: "menu-pop color-pop" },
       h("div", { class: "swatch-row" }, ...SWATCHES.map((c) => h("button", { class: f.color === c ? "on" : "", style: `background:${c}`, title: c, "aria-label": `Color ${c}`,
         onclick: () => { closeMenu(); updateFilter({ color: f.color === c ? null : c }); } })), custom),
+      h("div", { class: "hex-row" }, hex, h("button", { type: "button", class: "menu-clear", onclick: applyHex }, "Apply")),
       f.color ? h("button", { type: "button", class: "menu-clear", onclick: () => { closeMenu(); updateFilter({ color: null }); } }, "Clear color") : null);
     document.body.append(pop);
     const r = btn.getBoundingClientRect();
     pop.style.top = r.bottom + "px"; pop.style.left = Math.max(8, Math.min(r.left, innerWidth - pop.offsetWidth - 8)) + "px";
     btn.classList.add("open");
     openMenu = { btn, pop, key: "color" };
+    setTimeout(() => hex.focus(), 0);
   };
   btn.addEventListener("click", () => (openMenu?.btn === btn ? closeMenu() : btn._open()));
   return btn;
