@@ -116,11 +116,15 @@ def _scheduler():
                     "AND p.status='ready' AND p.deleted_at IS NULL").fetchone()[0]
                 ls = db.conn().execute("SELECT COALESCE(finished, started), status FROM jobs WHERE kind='sync' ORDER BY id DESC LIMIT 1").fetchone()
                 last_sync = ((ls[0] or 0) + (2 * 3600 if ls[1] == "error" else 0)) if ls else 0
-                if feeds_incomplete() and not busy and time.time() - last_sync > 10 * 60:
-                    enqueue("sync")       # a collection hasn't been read to the end yet: keep going from the bookmark
-                    busy = 1
-                if todo and not busy and time.time() - last_up > 15 * 60:
-                    enqueue("upgrade")    # sharpen older videos in the background, a batch at a time
+                last_kind = (db.conn().execute("SELECT kind FROM jobs WHERE kind IN ('sync','upgrade') ORDER BY id DESC LIMIT 1").fetchone() or [None])[0]
+                want_sync = bool(feeds_incomplete()) and time.time() - last_sync > 5 * 60
+                want_up = bool(todo) and time.time() - last_up > 5 * 60
+                if not busy and (want_sync or want_up):
+                    # take turns: a stretch of catching up on older saves, then a batch of quality upgrades
+                    if want_sync and (not want_up or last_kind != "sync"):
+                        enqueue("sync")
+                    else:
+                        enqueue("upgrade")
             hours = float(s.get("auto_sync_hours") or 0)
             if hours <= 0 or not (s.get("collections") or s.get("instagram_username")):
                 continue
@@ -469,6 +473,15 @@ def _save_feed(url, **kw):
                   (url, st["complete"], st["cursor"], st["seen"], db.now()))
 
 
+DEEP_STRETCH = 30 * 60
+
+
+def _has_upgrades():
+    return bool(db.conn().execute(
+        "SELECT 1 FROM media m JOIN posts p ON p.id=m.post_id WHERE m.kind='video' AND COALESCE(m.hq,0)=0 "
+        "AND p.status='ready' AND p.deleted_at IS NULL LIMIT 1").fetchone())
+
+
 def _oldest():
     return int(db.conn().execute("SELECT MIN(COALESCE(saved_at, added_at)) FROM posts").fetchone()[0] or db.now())
 
@@ -490,6 +503,7 @@ def run_sync(jid):
     rerank = int(s.get("rank_version") or 0) < 1     # one-time full pass to fix order from older versions
     run_start = db.now()
     ranked = set()
+    paused = False
     new_total, linked, failed_posts = 0, 0, 0
     for fi, (url, name) in enumerate(feeds):
         label = name or ("All saved" if "all-posts" in url else url)
@@ -503,7 +517,7 @@ def run_sync(jid):
             known_streak, seen = 0, 0
             floor = _oldest() - 1     # older saves found deeper in the feed sort below everything known so far
             holder = {}
-            last_save = time.time()
+            last_save = deep_started = time.time()
             try:
                 for post, files in _iter_posts(url, cursor, holder):
                     _check_cancel()
@@ -542,6 +556,11 @@ def run_sync(jid):
                             failed_posts += 1
                             with db.tx() as c:
                                 db.upsert_post(c, code, username=post.get("username") or "", status="failed", error=msg[:300])
+                    if mode == "deep" and time.time() - deep_started > DEEP_STRETCH and _has_upgrades():
+                        # take turns with the quality upgrades: bookmark and let them run, then carry on
+                        _save_feed(url, cursor=getattr(holder.get("ex"), "_cursor", None) or st["cursor"], seen=st["seen"] + seen)
+                        paused = True
+                        break
                     if mode == "deep" and time.time() - last_save > 10:   # bookmark, so a closed app resumes here
                         _save_feed(url, cursor=getattr(holder.get("ex"), "_cursor", None) or st["cursor"], seen=st["seen"] + seen)
                         last_save = time.time()
@@ -566,6 +585,8 @@ def run_sync(jid):
     if rerank:
         db.save_settings({"rank_version": 1})
     msg = f"Synced {len(feeds)} feed(s): {new_total} new post(s)"
+    if paused:
+        msg += ". Catching up continues after a round of quality upgrades"
     if linked:
         msg += f", {linked} collection link(s) updated"
     if failed_posts:

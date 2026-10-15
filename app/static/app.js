@@ -1116,8 +1116,10 @@ function renderDrawer(focus) {
     h("div", { class: "row" }, runBtn,
       h("button", { onclick: () => startJobs(["sync"]) }, "Check for new saves only"),
       c.pending ? h("button", { onclick: () => startJobs(["backfill"]) }, "Fetch waiting media") : null,
-      c.lowq ? h("button", { onclick: () => startJobs(["upgrade"]), title: "Re-download videos saved in lower quality, slowly in the background" }, `Upgrade ${c.lowq} videos to best quality`) : null,
+      null,
       h("button", { class: "danger", onclick: () => api("/api/jobs", { method: "POST", body: { action: "cancel" } }).then(() => toast("Stopping after the current post")) }, "Stop")),
+    c.lowq ? h("p", { class: "hint", style: "margin-top:10px" },
+      `${c.lowq.toLocaleString()} video posts are lined up to be re-checked for a sharper copy. Stash does this on its own in the background, taking turns with syncing. Nothing to click.`) : null,
     h("div", { class: "jobs", id: "jobList", style: "margin-top:14px" }));
   const verLine = h("div", { class: "stat-line", style: "margin-top:14px" }, "Stash " + (UPD?.current || ""));
   const verBtn = h("button", { onclick: async () => {
