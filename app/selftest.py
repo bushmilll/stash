@@ -159,8 +159,19 @@ def run(port):
             check("AI search finds the moment in a video", 2.0 <= best_t < 4.0, f"best match at {best_t}s, frames {sorted(set(times))}")
             # technique tags: the silhouette frame should read as a silhouette; the text card as typography
             from app import techniques
+            # a stand-in "library": the fixture frames plus random crops of the test images, so tags are judged relative to it
+            lib = [ai.embed_image(pth) for pth in (tmp / "card.jpg", tmp / "film.jpg", tmp / "a.png", tmp / "b.png")]
+            rng = np.random.default_rng(1)
+            for k in range(60):
+                arr = (rng.random((240, 320, 3)) * 255).astype(np.uint8) if k % 3 == 0 else np.asarray(fim.resize((320, 180)).rotate(k * 7))
+                Image.fromarray(arr).save(tmp / f"lib{k}.jpg")
+                lib.append(ai.embed_image(tmp / f"lib{k}.jpg"))
+            L = np.stack(lib)
+            raw = techniques._raw(techniques._norm(L))
+            techniques._stats.update(n=10 ** 9, v={k: (float(a.mean()), float(a.std()) + 1e-6) for k, a in raw.items()})
             tf = techniques.frame_tags([0.0], v2[None])
             tc = techniques.frame_tags([0.0], v1[None])
+            techniques._stats.update(n=-1)
             check("AI technique tags run", isinstance(tf, dict) and isinstance(tc, dict))
             if on_ci:
                 print(f"::notice title=Technique tags::silhouette frame -> {sorted(tf)}; text card -> {sorted(tc)}", flush=True)

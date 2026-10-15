@@ -20,7 +20,7 @@ import numpy as np
 
 from . import db
 
-TECH_VERSION = 2
+TECH_VERSION = 3
 
 # key: (label, group)
 TAGS = {
@@ -151,32 +151,66 @@ def frame_scores(vec):
     return out
 
 
+# Each tag's prompts have their own bias (some score high on almost anything), so a frame only gets a tag
+# when it stands out from the rest of *your* library on that measure, as well as clearing a floor.
+Z_BINARY, Z_EXCLUSIVE = 2.0, 1.5
+FLOOR_BINARY, FLOOR_EXCLUSIVE = 0.8, 0.5
+_stats = {"n": -1}
+
+
+def _raw(vecs):
+    """Per frame: binary tags as logit differences, exclusive classes as probabilities. -> {tag: array}"""
+    P = _prompt_vectors()
+    out = {}
+    for g in EXCLUSIVE:
+        keys, M = P[g]
+        lg = 100.0 * vecs @ _norm(M).T
+        p = np.exp(lg - lg.max(axis=1, keepdims=True)); p /= p.sum(axis=1, keepdims=True)
+        for ci, k in enumerate(keys):
+            if not k.startswith("_"):
+                out[k] = p[:, ci]
+    for k, (pos, neg) in ((k, P[k]) for k in BINARY):
+        out[k] = 100.0 * (vecs @ _norm(pos) - vecs @ _norm(neg))
+    return out
+
+
+def library_stats():
+    """Mean / spread of every tag's score over the library's frames (sampled), refreshed as the library grows."""
+    from . import ai
+    ix = ai._load_index()
+    mat = ix["mat"]
+    n = 0 if mat is None else len(mat)
+    if _stats["n"] >= 0 and n < _stats["n"] * 1.1 + 50:
+        return _stats.get("v")
+    if n < 300:            # too few frames to know what's typical yet
+        _stats.update(n=n, v=None)
+        return None
+    pick = np.random.default_rng(0).choice(n, size=min(n, 20000), replace=False)
+    raw = _raw(_norm(mat[pick].astype(np.float32)))
+    _stats.update(n=n, v={k: (float(a.mean()), float(a.std()) + 1e-6) for k, a in raw.items()})
+    return _stats["v"]
+
+
 def frame_tags(times, vecs):
     """vecs: (n, 512) frame vectors of one media item -> {tag: (score, first t)}."""
-    P = _prompt_vectors()
     out = {}
     if not len(vecs):
         return out
     vecs = _norm(np.asarray(vecs, np.float32))
     times = np.asarray(times, np.float32)
-    for g in EXCLUSIVE:
-        keys, M = P[g]
-        logits = 100.0 * vecs @ _norm(M).T
-        p = np.exp(logits - logits.max(axis=1, keepdims=True))
-        p /= p.sum(axis=1, keepdims=True)
-        for ci, k in enumerate(keys):
-            if k.startswith("_"):
-                continue
-            hit = p[:, ci] >= EXCLUSIVE_P
-            if hit.mean() >= SHARE or (len(vecs) <= 2 and hit.any()):
-                out[k] = (float(p[hit, ci].mean()), float(times[hit].min()))
-    for k in BINARY:
-        pos, neg = P[k]
-        logits = 100.0 * np.stack([vecs @ _norm(pos), vecs @ _norm(neg)], axis=1)
-        p = 1.0 / (1.0 + np.exp(logits[:, 1] - logits[:, 0]))
-        hit = p >= BINARY_P
+    stats = library_stats()
+    raw = _raw(vecs)
+    for k, a in raw.items():
+        binary = k in BINARY
+        prob = 1 / (1 + np.exp(-a)) if binary else a
+        floor = FLOOR_BINARY if binary else FLOOR_EXCLUSIVE
+        if stats and k in stats:
+            mu, sd = stats[k]
+            hit = (prob >= floor) & (a >= mu + (Z_BINARY if binary else Z_EXCLUSIVE) * sd)
+        else:   # new library: only very confident calls
+            hit = prob >= (0.985 if binary else 0.75)
         if hit.mean() >= SHARE or (len(vecs) <= 2 and hit.any()):
-            out[k] = (float(p[hit].mean()), float(times[hit].min()))
+            out[k] = (float(prob[hit].mean()), float(times[hit].min()))
     return out
 
 
