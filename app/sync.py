@@ -631,7 +631,9 @@ def _run_sync(jid, s, feeds, stop_after, rerank, run_start, ranked, pool, counts
                                 if c.total_changes > before:
                                     linked += 1
                                     db.reindex(c, pid)
-                        if mode == "top" and known_streak >= stop_after and not rerank:
+                        # the top pass stops at saves it already has; the catch-up pass (bookmarked) does the rest,
+                        # including the one-time re-ordering, so a restart never sends it back to the start
+                        if mode == "top" and known_streak >= stop_after:
                             break
                     else:
                         known_streak = 0
@@ -674,7 +676,7 @@ def _run_sync(jid, s, feeds, stop_after, rerank, run_start, ranked, pool, counts
     if "e" in stop:
         raise stop["e"]
     new_total, failed_posts = counts["new"], counts["failed"]
-    if rerank:
+    if rerank and all(_feed_state(u)["complete"] for u, _ in feeds):   # re-ordered all the way down
         db.save_settings({"rank_version": 1})
     msg = f"Synced {len(feeds)} feed(s): {new_total} new post(s)"
     if paused:
