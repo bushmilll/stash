@@ -711,8 +711,9 @@ function tile(p, i, ratio) {
   const hit = p.hit;
   const box = h("span", { class: "box" }, m.thumb_src ? (m.hit_src ? h("img", { src: m.hit_src, loading: "lazy", decoding: "async", alt: "" }) : sharpImg(m)) : null);
   if (hit && m.kind === "video" && hit.t >= 0.5) box.append(h("span", { class: "hitchip", title: "Where your search shows up" }, "▶ " + fmtTime(hit.t).replace(/\.\d\d$/, "")));
-  else if (hit && p.media_count > 1) box.append(h("span", { class: "hitchip" }, `${hit.idx + 1} / ${p.media_count}` + (S.filter.favorite && (p.fav_slides || []).length > 1 ? ` · ★${p.fav_slides.length}` : "")));
-  const el = h("button", { class: "tile" + (S.selected.has(p.id) ? " sel" : "") + (p.favorite ? " fav" : ""), "data-id": p.id, draggable: "true", "aria-label": `Post ${i + 1} by ${p.username || "unknown"}` }, box);
+  else if (hit && p.media_count > 1) box.append(h("span", { class: "hitchip" }, `${hit.idx + 1} / ${p.media_count}`));
+  const el = h("button", { class: "tile" + (S.selected.has(p.id) ? " sel" : "") + (p.favorite ? " fav" : ""), "data-id": p.id,
+    "data-slide": p.fav_slide != null ? p.fav_slide : null, draggable: "true", "aria-label": `Post ${i + 1} by ${p.username || "unknown"}` }, box);
   if (S.view === "index") {
     el.append(h("span", { class: "cap" }, h("span", { class: "n" }, num), h("span", { class: "k" }, (p.favorite ? "★ " : "") + kindLabel(p))),
       h("span", { class: "who" }, p.username ? "@" + p.username : p.shortcode));
@@ -733,7 +734,15 @@ function tile(p, i, ratio) {
   box.append(h("span", { class: "selbox", role: "checkbox", "aria-label": "Select", title: "Select (or ⌘-click the tile)",
     onclick: (e) => { e.stopPropagation(); e.preventDefault(); toggleSelect(p.id, el, e.shiftKey ? i : null); } }));
   const star = h("span", { class: "favstar", role: "button", title: "Favorite (F)", "aria-label": "Favorite",
-    onclick: (e) => { e.stopPropagation(); e.preventDefault(); const it = S.items.find((x) => x.id === p.id) || p; setFavorite([p.id], !it.favorite); } });
+    onclick: (e) => {
+      e.stopPropagation(); e.preventDefault();
+      if (p.fav_slide != null) {   // a starred-slide tile in Favorites: un-star (or re-star) just this slide
+        const on = !el.classList.contains("fav");
+        api(`/api/posts/${p.id}`, { method: "PATCH", body: { fav_slide: p.fav_slide, on } }).then(() => { el.classList.toggle("fav", on); loadSidebar(); });
+        return;
+      }
+      const it = S.items.find((x) => x.id === p.id) || p; setFavorite([p.id], !it.favorite);
+    } });
   star.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 2.8l2.75 5.9 6.45.75-4.78 4.4 1.3 6.37L12 17.02l-5.72 3.2 1.3-6.37L2.8 9.45l6.45-.75z"/></svg>';
   box.append(star);
   if (searchActive() && S.aiOn) {

@@ -213,14 +213,30 @@ async def list_posts(request):
         return JSONResponse({"ids": ids[:20000]})
     limit = min(int(qp.get("limit", 60)), 200)
     offset = int(qp.get("offset", 0))
-    page = ids[offset:offset + limit]
     c = db.conn()
+    # Favorites: every slide you starred in a carousel is its own tile
+    entries = [(i, None) for i in ids]
+    if qp.get("favorite"):
+        starred = {}
+        for pid_, fs in c.execute("SELECT id, fav_slides FROM posts WHERE favorite=1 AND fav_slides IS NOT NULL"):
+            try:
+                starred[pid_] = sorted(set(json.loads(fs or "[]")))
+            except Exception:
+                pass
+        entries = [(i, k) for i in ids for k in (starred.get(i) or [None])]
+    page_entries = entries[offset:offset + limit]
+    page = list(dict.fromkeys(i for i, _ in page_entries))
     rows = {r["id"]: r for r in c.execute(f"SELECT * FROM posts WHERE id IN ({','.join('?' * len(page))})", page)} if page else {}
     tech = [t for t in (qp.get("tech") or "").split(",") if t in techniques.TAGS] + \
         [techniques.tag_for_query(t) for t in search_terms(qp) if techniques.tag_for_query(t)]
     items = []
-    for i in page:
+    for i, slide in page_entries:
         if i not in rows:
+            continue
+        if slide is not None:
+            item = _with_hit(c, rows[i], slide, 0)
+            item["fav_slide"] = slide
+            items.append(item)
             continue
         if i in hits:   # show the item and the moment that matched the search
             items.append(_with_hit(c, rows[i], *hits[i]))
@@ -232,16 +248,8 @@ async def list_posts(request):
             if h_:
                 items.append(_with_hit(c, rows[i], h_[0], h_[1] or 0))
                 continue
-        if qp.get("favorite"):   # Favorites shows the (first) slide you favorited
-            try:
-                fs = sorted(set(json.loads(rows[i]["fav_slides"] or "[]")))
-            except Exception:
-                fs = []
-            if fs and (fs[0] > 0 or len(fs) > 1):
-                items.append(_with_hit(c, rows[i], fs[0], 0))
-                continue
         items.append(db.post_dict(c, rows[i]))
-    return JSONResponse({"items": items, "more": offset + limit < len(ids), "total": len(ids) if offset == 0 else None})
+    return JSONResponse({"items": items, "more": offset + limit < len(entries), "total": len(entries) if offset == 0 else None})
 
 
 def _with_hit(c, row, idx, t):
