@@ -319,7 +319,8 @@ def _gray_frames(src, duration):
     secs = min(float(duration or MAX_SECONDS), MAX_SECONDS)
     cmd = [media.FFMPEG, "-v", "error", "-t", f"{secs:.2f}", "-i", str(src),
            "-vf", f"fps={MFPS},scale={MW}:{MH},format=gray", "-f", "rawvideo", "-"]
-    raw = subprocess.run(cmd, capture_output=True, timeout=600).stdout
+    from . import activity
+    raw = subprocess.run(cmd, capture_output=True, timeout=600, **activity.low_priority()).stdout
     n = len(raw) // (MW * MH)
     return np.frombuffer(raw[:n * MW * MH], np.uint8).reshape(n, MH, MW).astype(np.float32)
 
@@ -518,8 +519,10 @@ def _migrate():
 def work_batch():
     if not _migrated["done"]:
         _migrate()
+    from . import activity
     rows = pending()
     for r in rows:
+        activity.wait_idle()
         try:
             tag_media(r)
         except Exception:

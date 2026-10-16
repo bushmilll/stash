@@ -10,6 +10,7 @@ Per media item (works from its thumbnail, so videos are covered by their poster 
   crop        the content box inside the bars, so the grid can trim them off
   vec         a small layout+color fingerprint used for "Similar shots" and "Search by image"
 """
+import functools
 import json
 import threading
 from pathlib import Path
@@ -43,6 +44,7 @@ def _srgb_to_lab(rgb):
     return np.stack([L, a, b], axis=-1)
 
 
+@functools.lru_cache(maxsize=4096)
 def hex_to_lab(hx):
     hx = hx.lstrip("#")
     rgb = np.array([int(hx[i:i + 2], 16) for i in (0, 2, 4)], dtype=float) / 255
@@ -179,6 +181,8 @@ def _worker():
     while True:
         try:
             _backfill_posters()
+            from . import activity
+            activity.wait_idle()
             ids = pending()
             if not ids and color_batch():
                 continue
@@ -193,6 +197,7 @@ def _worker():
                     time.sleep(10)
                 continue
             for mid in ids:
+                activity.wait_idle()
                 try:
                     with db.tx() as c:
                         analyze_media(c, mid)
@@ -297,7 +302,7 @@ def _frame_colors(im):
 def _video_moments(src, duration, n=COLOR_FRAMES):
     """~n frames spread across a video -> [(t, PIL image)]."""
     import os, subprocess, tempfile
-    from . import media
+    from . import activity, media
     dur = float(duration or 0)
     out = []
     with tempfile.TemporaryDirectory() as tmp:
@@ -305,11 +310,11 @@ def _video_moments(src, duration, n=COLOR_FRAMES):
             fps = n / dur
             subprocess.run([media.FFMPEG, "-v", "error", "-y", "-ss", f"{min(0.3, dur * 0.03):.2f}", "-i", str(src),
                             "-vf", f"fps={fps:.5f},scale=200:-2", "-frames:v", str(n), "-q:v", "5",
-                            os.path.join(tmp, "%03d.jpg")], capture_output=True, timeout=600)
+                            os.path.join(tmp, "%03d.jpg")], capture_output=True, timeout=600, **activity.low_priority())
         files = sorted(Path(tmp).glob("*.jpg"))
         if not files:
             subprocess.run([media.FFMPEG, "-v", "error", "-y", "-i", str(src), "-frames:v", "1", "-vf", "scale=200:-2",
-                            os.path.join(tmp, "001.jpg")], capture_output=True, timeout=120)
+                            os.path.join(tmp, "001.jpg")], capture_output=True, timeout=120, **activity.low_priority())
             files = sorted(Path(tmp).glob("*.jpg"))
         step = (dur / n) if dur > 1.5 else 0
         for i, f in enumerate(files):
@@ -347,8 +352,10 @@ def color_pending(limit=12):
 
 
 def color_batch():
+    from . import activity
     rows = color_pending()
     for r in rows:
+        activity.wait_idle()
         try:
             prof = color_profile(r)
         except Exception as e:
@@ -429,7 +436,7 @@ def color_matches(hex_color, candidates=None):
 
 
 def color_profiled(pid):
-    return pid in _color_index()["posts"]
+    return pid in _colors.get("posts", ())     # uses the index the last color_matches() built
 
 
 # ---------- color matching (older, cover-only palettes) ----------

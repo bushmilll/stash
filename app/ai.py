@@ -313,8 +313,9 @@ def _video_frames(src, duration, tmpdir):
     dur = float(duration or 0) or 1.0
     fps = 1.0 if dur <= MAX_FRAMES else MAX_FRAMES / dur
     pattern = os.path.join(tmpdir, "%04d.jpg")
+    from . import activity
     subprocess.run([media.FFMPEG, "-v", "error", "-y", "-i", str(src), "-vf", f"fps={fps:.4f},scale=360:-2",
-                    "-q:v", "4", pattern], capture_output=True, timeout=900)
+                    "-q:v", "4", pattern], capture_output=True, timeout=900, **activity.low_priority())
     files = sorted(Path(tmpdir).glob("*.jpg"))
     if not files:   # very short or odd clip: take the first frame
         subprocess.run([media.FFMPEG, "-v", "error", "-y", "-i", str(src), "-frames:v", "1", "-vf", "scale=360:-2",
@@ -372,8 +373,10 @@ def scan_batch():
     """Scan a few media items. Called from the analysis worker; returns how many were scanned."""
     if not ready():
         return 0
+    from . import activity
     rows = scan_pending()
     for r in rows:
+        activity.wait_idle()
         try:
             scan_media(r)
         except Exception as e:

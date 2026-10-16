@@ -15,7 +15,7 @@ from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from . import ai, analyze, boardvideo, db, importer, learn, media, storage, sync, techniques, updater
+from . import activity, ai, analyze, boardvideo, db, importer, learn, media, storage, sync, techniques, updater
 
 STATIC = Path(__file__).parent / "static"
 SORTS = {
@@ -87,8 +87,8 @@ def _where(qp, skip=()):
     for t in tech:
         by_group.setdefault(techniques.TAGS[t][1], []).append(t)
     for tags in by_group.values():
-        where.append(f"EXISTS (SELECT 1 FROM techniques tq JOIN media tm ON tm.id=tq.media_id WHERE tm.post_id=p.id "
-                     f"AND tq.tag IN ({','.join('?' * len(tags))}) AND tq.source!='no')")
+        where.append(f"p.id IN (SELECT tm.post_id FROM techniques tq JOIN media tm ON tm.id=tq.media_id "
+                     f"WHERE tq.tag IN ({','.join('?' * len(tags))}) AND tq.source!='no')")
         args.extend(tags)
     # look filters (computed from the pixels of the cover image); a comma means any of these
     look = {k: qp.get(k) for k in LOOK_COLS if qp.get(k) and k not in skip}
@@ -119,8 +119,8 @@ async def _matching(qp, skip=()):
     tech_terms = [t for t in terms if techniques.tag_for_query(t)]
     vis_terms = [t for t in terms if t not in tech_terms]
     for t in tech_terms:   # a technique typed as a search term works like picking it (and narrows)
-        where.append("EXISTS (SELECT 1 FROM techniques tq JOIN media tm ON tm.id=tq.media_id WHERE tm.post_id=p.id "
-                     "AND tq.tag=? AND tq.source!='no')")
+        where.append("p.id IN (SELECT tm.post_id FROM techniques tq JOIN media tm ON tm.id=tq.media_id "
+                     "WHERE tq.tag=? AND tq.source!='no')")
         args.append(techniques.tag_for_query(t))
     ranked, hits = None, {}
     use_ai = vis_terms and ai.ready() and ai._load_index()["mat"] is not None
@@ -1088,7 +1088,13 @@ def create_app():
         Mount("/files/thumbs", StaticFiles(directory=db.THUMB_DIR), name="thumbs"),
         Mount("/static", StaticFiles(directory=STATIC), name="static"),
     ]
-    return Starlette(routes=routes, exception_handlers={Exception: server_error})
+    inner = Starlette(routes=routes, exception_handlers={Exception: server_error})
+
+    async def app_(scope, receive, send):   # notice when you're using the app, so background work steps aside
+        if scope.get("type") == "http" and scope.get("path", "").startswith(("/api/", "/files/")):
+            activity.touch(scope["path"])
+        await inner(scope, receive, send)
+    return app_
 
 
 app = create_app()
