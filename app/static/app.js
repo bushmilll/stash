@@ -112,6 +112,9 @@ let openMenu = null;
 function reattachMenu(root) {
   if (!openMenu?.key || document.body.contains(openMenu.btn)) return;
   const nb = root.querySelector(`[data-menu-key="${openMenu.key}"]`);
+  if (nb && openMenu.keep) {   // the color picker stays exactly as it is (typing, or the Mac color panel open) while the bar redraws
+    openMenu.btn = nb; nb.classList.add("open"); return;
+  }
   const top = openMenu.pop.scrollTop;
   if (nb && nb._open) nb._open(top); else closeMenu();
 }
@@ -427,7 +430,6 @@ function renderScope() {
   else if (f.status === "pending") title = "Waiting for media";
   else if (f.status === "gone") title = "No longer on Instagram";
   else if (f.trashed) title = "Trash";
-  if (f.content && !f.collection && !f.tag && !f.creator) title = CONTENT.find(([v]) => v === f.content)?.[1] || title;
   if (f.similar) title = "Similar shots";
   if (f.simimg) title = "Looks like this";
   const h1 = h("h1", {}, title);
@@ -538,7 +540,9 @@ function colorButton() {
   btn._open = () => {
     closeMenu();
     const custom = h("input", { type: "color", value: f.color || "#c89723", title: "Pick any color", "aria-label": "Pick any color" });
-    custom.onchange = () => { closeMenu(); updateFilter({ color: custom.value }); };
+    // preview while you choose in the Mac color panel, apply when you're done
+    custom.oninput = () => { hex.value = custom.value.toUpperCase(); hex.classList.remove("bad"); };
+    custom.onchange = () => { closeMenu(); updateFilter({ color: custom.value.toLowerCase() }); };
     // or type a hex code
     const hex = h("input", { type: "text", class: "hex-in", placeholder: "#HEX", value: f.color ? f.color.toUpperCase() : "", maxlength: 7, spellcheck: "false", "aria-label": "Hex color" });
     const applyHex = () => {
@@ -549,7 +553,7 @@ function colorButton() {
     };
     hex.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Enter") applyHex(); if (e.key === "Escape") closeMenu(); hex.classList.remove("bad"); });
     const pop = h("div", { class: "menu-pop color-pop" },
-      h("div", { class: "swatch-row" }, ...SWATCHES.map((c) => h("button", { class: f.color === c ? "on" : "", style: `background:${c}`, title: c, "aria-label": `Color ${c}`,
+      h("div", { class: "swatch-row" }, ...SWATCHES.map((c) => h("button", { class: f.color === c ? "on" : "", style: `background:${c}`, title: c.toUpperCase(), "aria-label": `Color ${c}`,
         onclick: () => { closeMenu(); updateFilter({ color: f.color === c ? null : c }); } })), custom),
       h("div", { class: "hex-row" }, hex, h("button", { type: "button", class: "menu-clear", onclick: applyHex }, "Apply")),
       f.color ? h("button", { type: "button", class: "menu-clear", onclick: () => { closeMenu(); updateFilter({ color: null }); } }, "Clear color") : null);
@@ -557,7 +561,7 @@ function colorButton() {
     const r = btn.getBoundingClientRect();
     pop.style.top = r.bottom + "px"; pop.style.left = Math.max(8, Math.min(r.left, innerWidth - pop.offsetWidth - 8)) + "px";
     btn.classList.add("open");
-    openMenu = { btn, pop, key: "color" };
+    openMenu = { btn, pop, key: "color", keep: true };
     setTimeout(() => hex.focus(), 0);
   };
   btn.addEventListener("click", () => (openMenu?.btn === btn ? closeMenu() : btn._open()));
