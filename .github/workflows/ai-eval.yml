@@ -25,3 +25,15 @@ jobs:
         with:
           name: ai-eval-report
           path: /tmp/aieval/report.json
+
+  selftest:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: App self-test with the real AI model
+        run: STASH_SELFTEST=1 STASH_AI_TEST=1 STASH_MODEL_DIR="$HOME/stash-test-model" STASH_DATA="$RUNNER_TEMP/test-lib" STASH_PORT=8790 python stash_app.py
