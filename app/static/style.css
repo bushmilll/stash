@@ -636,17 +636,18 @@ code { font-family: var(--mono); font-size: var(--fs-xs); background: var(--cell
 #selbar .selstar.on:hover { color: var(--paper); }
 /* shuffle again / back */
 .sort-cell { display: flex; align-items: stretch; }
-.sort-cell .shuf { border: 0; border-left: 1px solid var(--rule-soft); padding: 0 10px; font-size: 14px; text-transform: none; }
+.sort-cell .shuf { border: 0; border-left: 1px solid var(--rule-soft); padding: 0 10px; display: flex; align-items: center; }
+.sort-cell .shuf svg { width: 15px; height: 15px; display: block; }
 .tile .box:has(.nomatch) .favstar { top: 26px; }
 
 /* back / forward */
 .navpair { display: flex; align-items: stretch; padding: 0 !important; }
-.navpair button { border: 0; padding: 0 9px; font-size: 14px; text-transform: none; line-height: 1; }
-.navpair button + button { border-left: 1px solid var(--rule-soft); }
+.navpair { padding: 0 6px !important; gap: 0; }
+.navpair button { border: 0; padding: 0 4px; font-size: 14px; text-transform: none; line-height: 1; }
 .navpair button:disabled { opacity: .3; cursor: default; background: none; color: inherit; }
 .info .head-row .navpair { border-right: 1px solid var(--rule); }
-.info .head-row .navpair button { padding: 0 12px; border-left: 0; }
-.info .head-row .navpair button + button { border-left: 1px solid var(--rule-soft); }
+.info .head-row .navpair button { padding: 0 4px; border-left: 0; }
+.info .head-row .navpair { padding: 0 8px !important; }
 /* never scroll sideways */
 html, body, .app { overflow-x: clip; }
 
@@ -668,3 +669,7 @@ html, body, .app { overflow-x: clip; }
 .board-opts .mlink svg { width: 14px; height: 14px; }
 .board-opts .mlink.on { color: var(--signal); border-color: var(--signal); }
 .board-opts .mlink:hover { background: none; color: var(--ink); }
+
+/* the filter bar, peeking back in under the top bar */
+.filters.peek { position: sticky; top: var(--bar); z-index: 4; background: var(--paper); animation: peekin .16s ease-out; box-shadow: 0 6px 16px rgba(0,0,0,.12); }
+@keyframes peekin { from { transform: translateY(-100%); opacity: 0; } to { transform: none; opacity: 1; } }

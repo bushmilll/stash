@@ -196,8 +196,11 @@ const DESKTOP = new URLSearchParams(location.search).has("app");
     { value: "saved", label: "Newest saves" }, { value: "saved_old", label: "Oldest saves" },
     { value: "posted", label: "Newest posts" }, { value: "random", label: "Shuffle" }] });
   sort.id = "sort"; sort.classList.add("plain-on");
-  const again = h("button", { id: "reshuffle", class: "shuf", title: "Shuffle again", hidden: true }, "↻");
-  const back = h("button", { id: "unshuffle", class: "shuf", title: "Back to the last shuffle", hidden: true }, "↶");
+  const again = h("button", { id: "reshuffle", class: "shuf", title: "Shuffle again", "aria-label": "Shuffle again", hidden: true });
+  const back = h("button", { id: "unshuffle", class: "shuf", title: "Back to the last shuffle", "aria-label": "Back to the last shuffle", hidden: true });
+  // same drawn arrow for both, mirrored, so they match exactly
+  const arc = '<svg viewBox="0 0 24 24"><path d="M19 12a7 7 0 1 1-2.05-4.95"/><path d="M19.5 3.5v4.5H15"/></svg>';
+  again.innerHTML = arc; back.innerHTML = arc; back.firstChild.style.transform = "scaleX(-1)";
   document.getElementById("sortCell").append(sort, again, back);
 }
 function openExternal(url) {
@@ -1607,6 +1610,24 @@ document.addEventListener("keydown", (e) => {
   else if ((e.key === "Delete" || e.key === "Backspace") && S.selected.size && $("#drawer").hidden) { e.preventDefault(); trashSelected(); }
 });
 window.addEventListener("hashchange", () => { readHash(); reload(); renderSidebar(); navCommit(); });
+
+// ---------------- filter bar follows you back up ----------------
+// far down the page, scrolling up a little brings the filter bar back under the top bar; scrolling down tucks it away
+(() => {
+  const bar = $("#filters");
+  let lastY = scrollY, up = 0, home = 0;
+  const homeTop = () => { if (!bar.classList.contains("peek")) home = bar.getBoundingClientRect().top + scrollY; return home; };
+  const show = () => { if (bar.classList.contains("peek")) return; homeTop(); bar.classList.add("peek"); };
+  const hide = () => { bar.classList.remove("peek"); };
+  window.addEventListener("scroll", () => {
+    if (!$("#viewer").hidden || !$("#board").hidden) return;
+    const y = scrollY, dy = y - lastY; lastY = y;
+    const barH = $(".bar").offsetHeight;
+    if (y + barH <= (bar.classList.contains("peek") ? home : homeTop())) { hide(); up = 0; return; }   // back where it lives
+    if (dy < 0) { up -= dy; if (up > 24) show(); }
+    else if (dy > 0) { up = 0; if (dy > 1 && !openMenu) hide(); }
+  }, { passive: true });
+})();
 
 // ---------------- back / forward ----------------
 // one trail through everything: library views, searches, posts and moodboards. ⌘[ and ⌘] work too.
