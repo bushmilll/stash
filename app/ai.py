@@ -516,6 +516,10 @@ def switch_to(name, pinned=False):
     if name == old:
         db.save_settings({"ai_model": name, "ai_model_pinned": bool(pinned)})
         return
+    try:      # a fresh backup of the library right before the switch, just in case
+        db.backup_now()
+    except Exception:
+        traceback.print_exc()
     with db.tx() as c:
         c.execute("INSERT INTO analysis (media_id, version) SELECT DISTINCT media_id, 0 FROM frames WHERE true "
                   "ON CONFLICT(media_id) DO NOTHING")
