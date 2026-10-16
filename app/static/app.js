@@ -193,6 +193,18 @@ function pick({ options = [], value = "", multi = false, label = "", placeholder
   return btn;
 }
 
+// opening a post or a moodboard freezes the library underneath; closing it puts you back exactly where you were
+const pageLock = { n: 0, y: 0 };
+function lockPage(on) {
+  if (on) {
+    if (pageLock.n++ === 0) { pageLock.y = window.scrollY; document.documentElement.style.overflow = "hidden"; }
+  } else if (pageLock.n > 0 && --pageLock.n === 0) {
+    document.documentElement.style.overflow = "";
+    window.scrollTo(0, pageLock.y);
+    requestAnimationFrame(() => window.scrollTo(0, pageLock.y));   // after the grid settles
+  }
+}
+window.lockPage = lockPage;
 const DESKTOP = new URLSearchParams(location.search).has("app");
 {   // the Sort menu in the top bar
   const sort = pick({ label: "Sort", value: "saved", options: [
@@ -943,7 +955,8 @@ async function openViewer(i) {
   const hit = S.items[i].hit;
   S.slide = hit ? hit.idx : 0;
   S.seekTo = hit && hit.t >= 0.5 ? hit.t : null;
-  $("#viewer").hidden = false; document.body.style.overflow = "hidden";
+  if ($("#viewer").hidden) lockPage(true);
+  $("#viewer").hidden = false;
   const id = S.items[i].id;
   wasOpen ? navReplace() : navCommit();   // stepping through posts updates this spot; opening one is a new step
   S.post = await api(`/api/posts/${id}`);
@@ -954,7 +967,8 @@ async function openViewer(i) {
 // closing it yourself (Esc, Close) is like going back; closing it to jump somewhere else isn't
 function userCloseViewer() { closeViewer(); navClosed(); }
 function closeViewer() {
-  $("#viewer").hidden = true; document.body.style.overflow = "";
+  if (!$("#viewer").hidden) lockPage(false);
+  $("#viewer").hidden = true;
   if (V.video) V.video.pause();
   fill($("#frame"), ); S.post = null;
 }
