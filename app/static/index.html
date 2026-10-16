@@ -77,9 +77,13 @@
     <div class="cell toggle" role="group" aria-label="Tilt" data-only="collage"><span class="lbl">Tilt</span><button data-tilt="0">Off</button><button data-tilt="1">On</button></div>
     <button class="cell" id="boardShuffle" data-only="collage" title="Scatter the posts into a new arrangement">Shuffle</button>
     <div class="cell toggle" role="group" aria-label="Layer" data-only="collage"><span class="lbl">Layer</span><button data-layer="back" title="Send to back (Shift+[)">To back</button><button data-layer="down" title="Back one ([)">Back</button><button data-layer="up" title="Forward one (])">Forward</button><button data-layer="front" title="Bring to front (Shift+])">To front</button></div>
-    <div class="cell toggle" role="group" aria-label="Video labels"><span class="lbl">Video labels</span><button data-vl="1">On</button><button data-vl="0">Off</button></div>
     <div class="cell toggle" role="group" aria-label="Loops"><span class="lbl">Loops</span><button data-motion="1" title="Play looping video tiles on the board">Play</button><button data-motion="0" title="Hold every tile still">Pause</button></div>
-    <label class="cell" title="Space around the edges. All the way left: images run to the edge"><span class="lbl">Margin</span><input type="range" id="boardMargin" min="0" max="160" step="4" value="48" aria-label="Margin"></label>
+    <div class="cell margins" title="Space around the edges. All the way left: images run to the edge">
+      <span class="lbl">Margin</span>
+      <span class="mside" title="Sides">↔</span><input type="range" id="boardMargin" min="0" max="160" step="4" value="48" aria-label="Side margins">
+      <button id="marginLink" class="mlink on" title="Link: move both margins together, in proportion" aria-label="Link margins" aria-pressed="true"><svg viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1"/><path d="M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1"/></svg></button>
+      <span class="mside" title="Top and bottom">↕</span><input type="range" id="boardMarginY" min="0" max="160" step="4" value="48" aria-label="Top and bottom margins">
+    </div>
     <label class="cell"><span class="lbl">Space</span><input type="range" id="boardGap" min="0" max="40" value="12" aria-label="Spacing"></label>
     <div class="cell"><span class="lbl">Ground</span><div class="swatches" id="swatches"></div></div>
     <button class="cell" id="addNote">Add note</button>

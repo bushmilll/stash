@@ -933,7 +933,7 @@ async def board_one(request):
             "vin", "vout", "still")   # vin/vout: the section a video tile loops; still: the frame static exports show
     items = [{k: it[k] for k in keep if k in it} for it in body.get("items", [])][:500]
     allowed = {"layout": str, "show_title": bool, "title_pos": str, "captions": (str, bool), "numbered": bool, "tile_ar": str,
-               "fill": bool, "tilt": bool, "video_labels": bool, "motion": bool, "size": str, "pages": str, "rows": int, "cols": int, "margin": int}
+               "fill": bool, "tilt": bool, "video_labels": bool, "motion": bool, "size": str, "pages": str, "rows": int, "cols": int, "margin": int, "margin_y": int, "margin_link": bool}
     settings = {k: v for k, v in (body.get("settings") or {}).items() if k in allowed and isinstance(v, allowed[k])}
     with db.tx() as w:
         w.execute("UPDATE boards SET name=?, bg=?, width=?, gap=?, items=?, settings=?, updated_at=? WHERE id=?",
