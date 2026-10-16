@@ -52,8 +52,11 @@ MODELS = {
                  files={"vision": ("onnx/vision_model.onnx", "vision.onnx"), "text": ("onnx/text_model_int8.onnx", "text.onnx"),
                         "tokenizer": ("tokenizer.json", "tokenizer.json")},
                  mb=655, mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5],
-                 pad=64, lower=True, scale=110.0,
-                 th=dict(near=0.84, proto=0.86, q_same=0.9, coll=0.93, dedupe=0.97, drop=0.12)),
+                 # scale: SigLIP's own logit scale is 112.7 (bias -16.8, measured), but its similarities spread ~1.34x wider
+                 # than CLIP's on real photos, so 75 keeps tag and label decisions as sharp as they were tuned for
+                 pad=64, lower=True, scale=75.0,
+                 # matched to CLIP's cut-offs by where they sit in each model's score distributions (800 COCO photos)
+                 th=dict(near=0.88, proto=0.90, q_same=0.88, coll=0.92, dedupe=0.975, drop=0.16)),
 }
 TARGET = SIGLIP          # the model new libraries use, and older ones move to
 OLD_MODEL_DIRS = [db.DATA_DIR / "models" / "clip-vit-b32"]
@@ -443,6 +446,14 @@ def scan_media(r, name=None):
             src = db.THUMB_DIR / r["thumb"]
         crop = json.loads(r["crop"]) if r["crop"] else None
         frames = [(0.0, _open(src, crop))]
+    if len(frames) > 2:
+        # skip frames that barely differ from the last one kept (a held shot): saves most of the scanning time
+        kept, last = [], None
+        for t, im in frames:
+            g = np.asarray(im.convert("L").resize((32, 18), Image.BILINEAR), dtype=np.float32)
+            if last is None or float(np.abs(g - last).mean()) >= 3.0:
+                kept.append((t, im)); last = g
+        frames = kept
     tensors, times = [], []
     for t, im in frames:
         im.thumbnail((640, 640))

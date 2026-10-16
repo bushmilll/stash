@@ -8,6 +8,7 @@ on:
 
 jobs:
   eval:
+    if: contains(github.event.head_commit.message, '[eval]') || github.event_name == 'workflow_dispatch'
     runs-on: macos-15
     timeout-minutes: 90
     steps:
