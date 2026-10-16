@@ -1,0 +1,27 @@
+# Test bench for the search model (runs only on ai-* test branches; never builds or releases the app).
+name: AI eval
+
+on:
+  push:
+    branches: ['ai-*']
+  workflow_dispatch:
+
+jobs:
+  eval:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install onnxruntime numpy pillow tokenizers requests
+      - name: Compare models
+        env:
+          N_IMAGES: "1000"
+        run: python ci/ai_eval.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ai-eval-report
+          path: /tmp/aieval/report.json
