@@ -650,3 +650,13 @@ code { font-family: var(--mono); font-size: var(--fs-xs); background: var(--cell
 .info .head-row .navpair button + button { border-left: 1px solid var(--rule-soft); }
 /* never scroll sideways */
 html, body, .app { overflow-x: clip; }
+
+/* collage: selection frame + corner handles, on top of every post */
+.selframe { position: absolute; z-index: 9000; pointer-events: none; outline: calc(2px * var(--k, 1)) solid var(--signal); }
+.selframe .h { position: absolute; width: calc(12px * var(--k, 1)); height: calc(12px * var(--k, 1)); background: var(--signal); pointer-events: auto; box-shadow: 0 0 0 calc(1px * var(--k, 1)) #000; }
+.selframe .h.nw { left: calc(-6px * var(--k, 1)); top: calc(-6px * var(--k, 1)); cursor: nwse-resize; }
+.selframe .h.se { right: calc(-6px * var(--k, 1)); bottom: calc(-6px * var(--k, 1)); cursor: nwse-resize; }
+.selframe .h.ne { right: calc(-6px * var(--k, 1)); top: calc(-6px * var(--k, 1)); cursor: nesw-resize; }
+.selframe .h.sw { left: calc(-6px * var(--k, 1)); bottom: calc(-6px * var(--k, 1)); cursor: nesw-resize; }
+.bitem.media .grip { display: none !important; }
+.bitem.media.free.sel { outline: none; }

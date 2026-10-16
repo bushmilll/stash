@@ -472,7 +472,7 @@ const Board = (() => {
     if (!B) return;
     view = compute(); paint();
     if (measure()) { view = compute(); paint(); }
-    fit();
+    fit(); selFrame();
   }
   function fit() {
     if (!B || !view) return;
@@ -489,7 +489,22 @@ const Board = (() => {
   function select(it) {
     selected = it;
     for (const [k, el] of els) el.classList.toggle("sel", k === it);
-    syncControls(); clipPanel();
+    syncControls(); clipPanel(); selFrame();
+  }
+  // collage: the selected post gets a frame with four corner handles, drawn above everything so neighbours can't cover them
+  function selFrame() {
+    const paper = $("#paper");
+    let f = paper.querySelector(".selframe");
+    const it = selected;
+    if (!B || !it || isText(it) || st.layout !== "collage" || !view?.media.get(it)) { if (f) f.hidden = true; return; }
+    if (!f) {
+      f = h("div", { class: "selframe" }, ...["nw", "ne", "sw", "se"].map((c) => h("span", { class: "h " + c, "data-c": c })));
+      paper.append(f);
+    }
+    const p = collageP(it), k = 1 / (scale || 1);
+    f.hidden = false;
+    Object.assign(f.style, { left: p.x + "px", top: p.y + "px", width: p.w + "px", height: p.h + "px",
+      transform: p.rot ? `rotate(${p.rot}deg)` : "", "--k": k });
   }
   function toFront(it) { it.z = Math.max(0, ...B.items.filter((i) => isText(i) === isText(it)).map((i) => i.z || 0)) + 1; }
   function drawSwatches() {
@@ -641,6 +656,13 @@ const Board = (() => {
     let drag = null;
     paper.addEventListener("pointerdown", (e) => {
       if (editing) return;
+      const hd = e.target.closest(".selframe .h");
+      if (hd && selected && !isText(selected)) {
+        const it = selected;
+        drag = { it, el: els.get(it), free: true, isMedia: true, started: false, mode: "resize", corner: hd.dataset.c,
+          sx: e.clientX, sy: e.clientY, cx: it.cx, cy: it.cy, cw: it.cw, ch: it.ch };
+        paper.setPointerCapture(e.pointerId); e.preventDefault(); return;
+      }
       const el = e.target.closest(".bitem");
       if (!el || el.classList.contains("derived") || !el._item) { select(null); return; }
       const it = el._item, isMedia = !isText(it), free = !isMedia || st.layout === "collage";
@@ -663,8 +685,16 @@ const Board = (() => {
       } else if (drag.free) {   // collage: moving a piece doesn't change its layer; [ and ] do
         const k = cs().s;
         if (drag.mode === "move") { it.cx = Math.round(drag.cx + dx / k); it.cy = Math.round(Math.max(-view.y0, drag.cy + dy / k)); }
-        else { const nw = Math.max(60, drag.cw + dx / k); it.cw = Math.round(nw); it.ch = Math.round(drag.ch * nw / drag.cw); }
-        placeMedia(drag.el, it, collageP(it));
+        else {
+          // drag any corner; the opposite corner stays put and the post keeps its shape
+          const c = drag.corner || "se", east = c.includes("e"), south = c.includes("s");
+          const byX = drag.cw + (east ? dx : -dx) / k, byY = (drag.ch + (south ? dy : -dy) / k) * drag.cw / drag.ch;
+          const nw = Math.max(60, Math.abs(byX - drag.cw) >= Math.abs(byY - drag.cw) ? byX : byY), nh = drag.ch * nw / drag.cw;
+          it.cw = Math.round(nw); it.ch = Math.round(nh);
+          if (!east) it.cx = Math.round(drag.cx + drag.cw - nw);
+          if (!south) it.cy = Math.round(drag.cy + drag.ch - nh);
+        }
+        placeMedia(drag.el, it, collageP(it)); selFrame();
       } else {   // structured: lift the post and show where it would land
         drag.el.classList.add("lifting");
         drag.el.style.left = drag.p.x + dx + "px"; drag.el.style.top = drag.p.y + dy + "px";
