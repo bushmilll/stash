@@ -174,8 +174,11 @@ def init():
         cols = {r[1] for r in c.execute("PRAGMA table_info(posts)")}
         if "deleted_at" not in cols:
             c.execute("ALTER TABLE posts ADD COLUMN deleted_at INTEGER")
-        if "fav_idx" not in cols:   # which slide of a carousel you favorited
+        if "fav_idx" not in cols:   # which slide of a carousel you favorited (older; see fav_slides)
             c.execute("ALTER TABLE posts ADD COLUMN fav_idx INTEGER DEFAULT 0")
+        if "fav_slides" not in cols:   # every slide of a carousel you favorited, e.g. [0, 3]
+            c.execute("ALTER TABLE posts ADD COLUMN fav_slides TEXT")
+            c.execute("UPDATE posts SET fav_slides='[' || COALESCE(fav_idx, 0) || ']' WHERE favorite=1 AND COALESCE(fav_idx, 0) > 0")
         if "saved_src" not in cols:
             # where the "saved" time came from: 'export' = real date from Instagram's data export,
             # 'feed' = estimated from the order of the collection feed. Older rows: an export date is
@@ -288,6 +291,10 @@ def reindex(c, post_id):
 
 def post_dict(c, row, full=False):
     d = dict(row)
+    try:
+        d["fav_slides"] = sorted(set(json.loads(d.get("fav_slides") or "[]")))
+    except Exception:
+        d["fav_slides"] = []
     media = [dict(m) for m in c.execute(
         "SELECT m.id, m.idx, m.kind, m.path, m.thumb, m.poster, m.width, m.height, m.duration, m.hq, "
         "a.palette, a.tone, a.sat, a.temp, a.contrast, a.ar, a.ar_label, a.crop, "

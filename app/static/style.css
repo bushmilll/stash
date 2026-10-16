@@ -675,3 +675,7 @@ html, body, .app { overflow-x: clip; }
 /* the filter bar, peeking back in under the top bar */
 .filters.peek { position: sticky; top: var(--bar); z-index: 4; background: var(--paper); animation: peekin .16s ease-out; box-shadow: 0 6px 16px rgba(0,0,0,.12); }
 @keyframes peekin { from { transform: translateY(-100%); opacity: 0; } to { transform: none; opacity: 1; } }
+
+/* starred carousel slides in the post view */
+.slides button { position: relative; }
+.slides button.starred::after { content: "★"; position: absolute; right: 2px; top: 0; color: var(--signal); font-size: 11px; line-height: 1.2; text-shadow: 0 0 2px #000; }

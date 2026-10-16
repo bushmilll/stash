@@ -232,9 +232,14 @@ async def list_posts(request):
             if h_:
                 items.append(_with_hit(c, rows[i], h_[0], h_[1] or 0))
                 continue
-        if qp.get("favorite") and (rows[i]["fav_idx"] or 0) > 0:   # Favorites shows the slide you favorited
-            items.append(_with_hit(c, rows[i], rows[i]["fav_idx"], 0))
-            continue
+        if qp.get("favorite"):   # Favorites shows the (first) slide you favorited
+            try:
+                fs = sorted(set(json.loads(rows[i]["fav_slides"] or "[]")))
+            except Exception:
+                fs = []
+            if fs and (fs[0] > 0 or len(fs) > 1):
+                items.append(_with_hit(c, rows[i], fs[0], 0))
+                continue
         items.append(db.post_dict(c, rows[i]))
     return JSONResponse({"items": items, "more": offset + limit < len(ids), "total": len(ids) if offset == 0 else None})
 
@@ -316,8 +321,18 @@ async def update_post(request):
             c.execute("UPDATE posts SET notes=? WHERE id=?", (str(body["notes"])[:20000], pid))
         if "favorite" in body:
             c.execute("UPDATE posts SET favorite=? WHERE id=?", (1 if body["favorite"] else 0, pid))
-        if "fav_idx" in body:
-            c.execute("UPDATE posts SET fav_idx=? WHERE id=?", (max(0, int(body["fav_idx"] or 0)), pid))
+            if not body["favorite"]:
+                c.execute("UPDATE posts SET fav_slides=NULL WHERE id=?", (pid,))
+        if "fav_slide" in body:   # star or un-star one slide of a carousel; the post is a favorite while any slide is
+            row = c.execute("SELECT fav_slides FROM posts WHERE id=?", (pid,)).fetchone()
+            try:
+                slides = set(json.loads((row[0] if row else None) or "[]"))
+            except Exception:
+                slides = set()
+            k = max(0, int(body["fav_slide"] or 0))
+            (slides.add if body.get("on", True) else slides.discard)(k)
+            c.execute("UPDATE posts SET fav_slides=?, favorite=? WHERE id=?",
+                      (json.dumps(sorted(slides)) if slides else None, 1 if slides else 0, pid))
         for name in body.get("add_tags", []):
             if name.strip():
                 tid = db.get_or_create(c, "tags", name.strip().lstrip("#"))
@@ -344,6 +359,8 @@ async def bulk(request):
     with db.tx() as c:
         if "favorite" in body:
             c.executemany("UPDATE posts SET favorite=? WHERE id=?", [(1 if body["favorite"] else 0, pid) for pid in ids])
+            if not body["favorite"]:
+                c.executemany("UPDATE posts SET fav_slides=NULL WHERE id=?", [(pid,) for pid in ids])
         for pid in ids:
             for name in body.get("add_tags", []):
                 tid = db.get_or_create(c, "tags", name.strip().lstrip("#"))

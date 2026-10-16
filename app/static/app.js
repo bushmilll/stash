@@ -711,7 +711,7 @@ function tile(p, i, ratio) {
   const hit = p.hit;
   const box = h("span", { class: "box" }, m.thumb_src ? (m.hit_src ? h("img", { src: m.hit_src, loading: "lazy", decoding: "async", alt: "" }) : sharpImg(m)) : null);
   if (hit && m.kind === "video" && hit.t >= 0.5) box.append(h("span", { class: "hitchip", title: "Where your search shows up" }, "▶ " + fmtTime(hit.t).replace(/\.\d\d$/, "")));
-  else if (hit && p.media_count > 1) box.append(h("span", { class: "hitchip" }, `${hit.idx + 1} / ${p.media_count}`));
+  else if (hit && p.media_count > 1) box.append(h("span", { class: "hitchip" }, `${hit.idx + 1} / ${p.media_count}` + (S.filter.favorite && (p.fav_slides || []).length > 1 ? ` · ★${p.fav_slides.length}` : "")));
   const el = h("button", { class: "tile" + (S.selected.has(p.id) ? " sel" : "") + (p.favorite ? " fav" : ""), "data-id": p.id, draggable: "true", "aria-label": `Post ${i + 1} by ${p.username || "unknown"}` }, box);
   if (S.view === "index") {
     el.append(h("span", { class: "cap" }, h("span", { class: "n" }, num), h("span", { class: "k" }, (p.favorite ? "★ " : "") + kindLabel(p))),
@@ -972,7 +972,7 @@ function renderStage() {
     $("#deck").hidden = true;
   }
   const slides = S.post.media.length > 1 ? S.post.media.map((mm, j) =>
-    h("button", { class: j === S.slide ? "on" : "", onclick: () => { S.slide = j; S.inPt = S.outPt = null; renderStage(); renderInfo(); }, "aria-label": `Item ${j + 1}` },
+    h("button", { class: (j === S.slide ? "on" : "") + ((S.post.fav_slides || []).includes(j) ? " starred" : ""), onclick: () => { S.slide = j; S.inPt = S.outPt = null; renderStage(); renderInfo(); }, "aria-label": `Item ${j + 1}` },
       h("img", { src: mm.thumb_src, alt: "" }))) : [];
   fill($("#slides"), ...slides);
   updateDeck();
@@ -1088,7 +1088,8 @@ function renderInfo() {
   const save = async (body) => {
     S.post = await api(`/api/posts/${p.id}`, { method: "PATCH", body });
     const item = S.items[S.viewerIndex];
-    if (item && item.id === p.id) Object.assign(item, { favorite: S.post.favorite });
+    if (item && item.id === p.id) Object.assign(item, { favorite: S.post.favorite, fav_slides: S.post.fav_slides });
+    document.querySelectorAll("#slides button").forEach((b, j) => b.classList.toggle("starred", (S.post.fav_slides || []).includes(j)));
     document.querySelectorAll(`#grid .tile[data-id="${p.id}"]`).forEach((t) => t.classList.toggle("fav", !!S.post.favorite));
     renderInfo(); loadSidebar();
   };
@@ -1146,12 +1147,13 @@ function renderInfo() {
       navPair(),
       h("span", { class: "pos" }, `${pad(S.viewerIndex + 1)} / ${pad(total)}`),
       (() => {
-        // on a carousel, the slide you favorite is the one Favorites shows; on another slide, the button moves it here
-        const multi = p.media.length > 1, other = p.favorite && multi && (p.fav_idx || 0) !== S.slide;
-        const on = p.favorite && !other;
+        // carousels: star any number of slides; Favorites shows the first one you starred
+        const multi = p.media.length > 1;
+        const slides = p.fav_slides || [];
+        const on = multi ? (slides.includes(S.slide) || (p.favorite && !slides.length && S.slide === 0)) : !!p.favorite;
         return h("button", { class: "fav-btn" + (on ? " on" : ""), title: "Favorite (F)", "aria-pressed": on ? "true" : "false",
-          onclick: () => save(other ? { fav_idx: S.slide } : { favorite: !p.favorite, fav_idx: S.slide }) },
-          on ? "★ Favorite" : other ? "☆ Favorite this slide" : "☆ Favorite");
+          onclick: () => save(multi ? { fav_slide: S.slide, on: !on } : { favorite: !p.favorite }) },
+          (on ? "★ " : "☆ ") + (multi ? "Favorite slide" : "Favorite"));
       })()),
     h("div", { class: "spec" },
       ...spec("Creator", p.username ? h("a", { href: "#", onclick: (e) => { e.preventDefault(); closeViewer(); setFilter({ creator: p.username }, false); } }, "@" + p.username) : "–"),
