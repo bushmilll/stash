@@ -12,6 +12,7 @@ Per media item (works from its thumbnail, so videos are covered by their poster 
 """
 import json
 import threading
+from pathlib import Path
 import time
 import traceback
 
@@ -179,6 +180,8 @@ def _worker():
         try:
             _backfill_posters()
             ids = pending()
+            if not ids and color_batch():
+                continue
             if not ids:
                 from . import ai
                 try:
@@ -257,7 +260,179 @@ def image_query(token):
     return _image_queries.get(token)
 
 
-# ---------- color matching ----------
+# ---------- color profiles ----------
+# Every image, every carousel slide, and ~8 moments across every video get a detailed color breakdown
+# (up to 24 colors each, down to half a percent of the frame), so small accents and colors that only show up
+# partway through a clip can be found. Searching a color scores each moment by how much of it is close to that
+# color, and the best moment wins: that's the slide / frame the tile shows.
+
+COLOR_VERSION = 1
+COLOR_FRAMES = 8
+
+
+def _frame_colors(im):
+    """PIL image -> [[L, a, b, share], ...] for its content area (letterbox bars removed)."""
+    im = ImageOps.exif_transpose(im).convert("RGB")
+    im.thumbnail((200, 200))
+    arr = np.asarray(im, dtype=np.float32) / 255.0
+    lab = _srgb_to_lab(arr)
+    x0, y0, x1, y1 = _content_box(lab[..., 0])
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        x0, y0, x1, y1 = 0, 0, arr.shape[1], arr.shape[0]
+    cim = Image.fromarray((arr[y0:y1, x0:x1] * 255).astype(np.uint8))
+    q = cim.quantize(colors=24, method=Image.Quantize.MEDIANCUT)
+    pal = np.array(q.getpalette()[:72], dtype=np.float32).reshape(-1, 3) / 255.0
+    counts = q.getcolors() or []
+    total = sum(c for c, _ in counts) or 1
+    out = []
+    for c, i in sorted(counts, reverse=True):
+        share = c / total
+        if share < 0.004 or i >= len(pal):
+            continue
+        L, a, b = (float(v) for v in _srgb_to_lab(pal[i]))
+        out.append([round(L, 1), round(a, 1), round(b, 1), round(share, 4)])
+    return out
+
+
+def _video_moments(src, duration, n=COLOR_FRAMES):
+    """~n frames spread across a video -> [(t, PIL image)]."""
+    import os, subprocess, tempfile
+    from . import media
+    dur = float(duration or 0)
+    out = []
+    with tempfile.TemporaryDirectory() as tmp:
+        if dur > 1.5:
+            fps = n / dur
+            subprocess.run([media.FFMPEG, "-v", "error", "-y", "-ss", f"{min(0.3, dur * 0.03):.2f}", "-i", str(src),
+                            "-vf", f"fps={fps:.5f},scale=200:-2", "-frames:v", str(n), "-q:v", "5",
+                            os.path.join(tmp, "%03d.jpg")], capture_output=True, timeout=600)
+        files = sorted(Path(tmp).glob("*.jpg"))
+        if not files:
+            subprocess.run([media.FFMPEG, "-v", "error", "-y", "-i", str(src), "-frames:v", "1", "-vf", "scale=200:-2",
+                            os.path.join(tmp, "001.jpg")], capture_output=True, timeout=120)
+            files = sorted(Path(tmp).glob("*.jpg"))
+        step = (dur / n) if dur > 1.5 else 0
+        for i, f in enumerate(files):
+            with Image.open(f) as im:
+                out.append((round(min(0.3, dur * 0.03) + i * step, 2), im.copy()))
+    return out
+
+
+def color_profile(r):
+    """r: media row (id, kind, path, thumb, poster, duration) -> [[t, colors], ...]."""
+    if r["kind"] == "video":
+        src = db.media_path(r["path"]) if r["path"] else None
+        if src and src.exists():
+            moments = _video_moments(src, r["duration"])
+            if moments:
+                return [[t, _frame_colors(im)] for t, im in moments]
+        alt = db.THUMB_DIR / (r["poster"] or r["thumb"] or "")
+        if not alt.is_file():
+            raise FileNotFoundError(src)
+        with Image.open(alt) as im:
+            return [[0.0, _frame_colors(im)]]
+    src = db.media_path(r["path"]) if r["path"] else None
+    if not src or not src.exists():
+        src = db.THUMB_DIR / (r["thumb"] or "")
+    with Image.open(src) as im:
+        return [[0.0, _frame_colors(im)]]
+
+
+def color_pending(limit=12):
+    return db.conn().execute(
+        "SELECT m.id, m.kind, m.path, m.thumb, m.poster, m.duration FROM media m JOIN posts p ON p.id=m.post_id "
+        "LEFT JOIN analysis a ON a.media_id=m.id WHERE p.deleted_at IS NULL AND p.status='ready' AND m.thumb IS NOT NULL "
+        "AND COALESCE(a.color_version, 0) < ? ORDER BY COALESCE(p.saved_at, p.added_at) DESC LIMIT ?",
+        (COLOR_VERSION, limit)).fetchall()
+
+
+def color_batch():
+    rows = color_pending()
+    for r in rows:
+        try:
+            prof = color_profile(r)
+        except Exception as e:
+            if not isinstance(e, FileNotFoundError):
+                traceback.print_exc()
+            if not db.media_available():
+                return 0          # originals offline: try again later
+            prof = None
+        with db.tx() as c:
+            c.execute("INSERT INTO analysis (media_id, version) VALUES (?, 0) ON CONFLICT(media_id) DO NOTHING", (r["id"],))
+            c.execute("UPDATE analysis SET colors=?, color_version=? WHERE media_id=?",
+                      (json.dumps(prof, separators=(",", ":")) if prof else None, COLOR_VERSION, r["id"]))
+        _colors["dirty"] = True
+    return len(rows)
+
+
+_colors = {"dirty": True, "n": -1}
+
+
+def _color_index():
+    """Every color of every profiled moment, as flat arrays for fast matching."""
+    c = db.conn()
+    n = c.execute("SELECT COUNT(*) FROM analysis WHERE color_version>=? AND colors IS NOT NULL", (COLOR_VERSION,)).fetchone()[0]
+    if not _colors["dirty"] and n == _colors["n"]:
+        return _colors
+    if "lab" in _colors and time.time() - _colors.get("at", 0) < 60:
+        return _colors       # still profiling the library: refresh at most once a minute (newer ones use the cover palette meanwhile)
+    lab, share, frame = [], [], []
+    frames = []           # (post_id, idx, t)
+    for pid, idx, data in c.execute(
+            "SELECT m.post_id, m.idx, a.colors FROM analysis a JOIN media m ON m.id=a.media_id "
+            "WHERE a.color_version>=? AND a.colors IS NOT NULL", (COLOR_VERSION,)):
+        try:
+            prof = json.loads(data)
+        except Exception:
+            continue
+        for t, cols in prof:
+            fi = len(frames)
+            frames.append((pid, idx, t))
+            for L, a, b, sh in cols:
+                lab.append((L, a, b)); share.append(sh); frame.append(fi)
+    _colors.update(dirty=False, n=n, at=time.time(),
+                   lab=np.array(lab, np.float32).reshape(-1, 3), share=np.array(share, np.float32),
+                   frame=np.array(frame, np.int64), frames=frames,
+                   posts={f[0] for f in frames})
+    return _colors
+
+
+def color_matches(hex_color, candidates=None):
+    """{post_id: (score, media idx, t)} for posts whose best moment features this color."""
+    ix = _color_index()
+    if not len(ix["share"]):
+        return {}
+    tL, ta, tb = (float(v) for v in hex_to_lab(hex_color))
+    t_chroma = (ta ** 2 + tb ** 2) ** 0.5
+    L, A, Bb = ix["lab"][:, 0], ix["lab"][:, 1], ix["lab"][:, 2]
+    chroma = np.sqrt(A ** 2 + Bb ** 2)
+    if t_chroma >= 10:
+        # a color: hue and colorfulness matter most, lightness less (dark teal still counts as teal); greys never do
+        d = np.sqrt((0.4 * (L - tL)) ** 2 + (A - ta) ** 2 + (Bb - tb) ** 2)
+        w = np.clip(1 - d / 32, 0, 1) * (chroma >= 7)
+        floor = 0.02
+    else:
+        # white / grey / black: neutral pixels near that lightness, and it has to be a real part of the frame
+        d = np.sqrt((L - tL) ** 2 + (1.3 * chroma) ** 2)
+        w = np.clip(1 - d / 28, 0, 1)
+        floor = 0.12
+    per_frame = np.bincount(ix["frame"], weights=ix["share"] * w, minlength=len(ix["frames"]))
+    out = {}
+    for fi in np.nonzero(per_frame >= floor)[0]:
+        pid, idx, t = ix["frames"][fi]
+        if candidates is not None and pid not in candidates:
+            continue
+        sc = float(per_frame[fi])
+        if pid not in out or sc > out[pid][0]:
+            out[pid] = (sc, idx, t)
+    return out
+
+
+def color_profiled(pid):
+    return pid in _color_index()["posts"]
+
+
+# ---------- color matching (older, cover-only palettes) ----------
 
 def color_score(palette_json, target_lab):
     """How strongly a frame features this color: share of the palette within reach of it."""

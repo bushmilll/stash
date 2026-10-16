@@ -195,7 +195,7 @@ def init():
         acols = {r[1] for r in c.execute("PRAGMA table_info(analysis)")}
         for col, typ in (("content", "TEXT"), ("content_conf", "REAL"), ("clip", "BLOB"),
                          ("ai_version", "INTEGER"), ("content_user", "TEXT"), ("scan_version", "INTEGER"),
-                         ("tech_version", "INTEGER")):
+                         ("tech_version", "INTEGER"), ("colors", "TEXT"), ("color_version", "INTEGER")):
             if col not in acols:
                 c.execute(f"ALTER TABLE analysis ADD COLUMN {col} {typ}")
         c.commit()

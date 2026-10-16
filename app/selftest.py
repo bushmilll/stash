@@ -94,6 +94,21 @@ def run(port):
         comp.save(tmp / "comp.png")
         ct, cx = techniques.composition(tmp / "comp.png")
         check("composition: left heavy", "left_heavy" in ct, f"{sorted(ct)} weight at {cx:.2f}")
+        # color profiles: a small red accent on a grey frame is found; a video's color is found mid-clip
+        from app import analyze
+        acc = Image.new("RGB", (900, 600), (120, 120, 125)); ImageDraw.Draw(acc).rectangle([600, 100, 690, 220], fill=(200, 20, 30))
+        acc.save(tmp / "accent.png")
+        with Image.open(tmp / "accent.png") as im_:
+            cols = analyze._frame_colors(im_)
+        red = [c_ for c_ in cols if c_[1] > 40]
+        check("color: small accent kept in the breakdown", bool(red), str(cols[:4]))
+        cv = tmp / "colorclip.mp4"
+        subprocess.run([media.FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=0x404040:s=320x180:d=2",
+                        "-f", "lavfi", "-i", "color=c=0x1fb5ad:s=320x180:d=2", "-filter_complex", "[0][1]concat=n=2:v=1",
+                        "-pix_fmt", "yuv420p", str(cv)], check=True, timeout=120)
+        moments = analyze._video_moments(cv, 4)
+        teal = [t for t, im_ in moments if any(abs(c_[1] + 30) < 15 and abs(c_[2] + 8) < 15 for c_ in analyze._frame_colors(im_))]
+        check("color: teal found in the second half of a clip", bool(teal) and min(teal) >= 1.5, f"{len(moments)} moments, teal at {teal}")
         # moodboard video: one still layer + one looping tile
         from app import boardvideo
         Image.new("RGB", (640, 360), (236, 234, 229)).save(tmp / "layer0.png")

@@ -201,9 +201,9 @@ const DESKTOP = new URLSearchParams(location.search).has("app");
   sort.id = "sort"; sort.classList.add("plain-on");
   const again = h("button", { id: "reshuffle", class: "shuf", title: "Shuffle again", "aria-label": "Shuffle again", hidden: true });
   const back = h("button", { id: "unshuffle", class: "shuf", title: "Back to the last shuffle", "aria-label": "Back to the last shuffle", hidden: true });
-  // same drawn arrow for both, mirrored, so they match exactly
-  const arc = '<svg viewBox="0 0 24 24"><path d="M19 12a7 7 0 1 1-2.05-4.95"/><path d="M19.5 3.5v4.5H15"/></svg>';
-  again.innerHTML = arc; back.innerHTML = arc; back.firstChild.style.transform = "scaleX(-1)";
+  // same line weight and size: a circular "deal again" arrow, and an undo arrow for going back
+  again.innerHTML = '<svg viewBox="0 0 24 24"><path d="M19 12a7 7 0 1 1-2.05-4.95"/><path d="M19.5 3.5v4.5H15"/></svg>';
+  back.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>';
   document.getElementById("sortCell").append(sort, again, back);
 }
 function openExternal(url) {

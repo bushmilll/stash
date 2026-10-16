@@ -177,10 +177,20 @@ async def matching_ids(qp, skip=()):
         cands = {r[0]: r[1] for r in rows}
         ids = [i for i in ranked if i in cands] if ranked is not None else list(cands)
         if qp.get("color"):
-            target = analyze.hex_to_lab(qp["color"])
-            scored = [(analyze.color_score(cands[i], target), i) for i in ids]
-            ids = [i for s_, i in scored if s_ >= 0.08] if ranked is not None else \
-                [i for s_, i in sorted(scored, key=lambda t: -t[0]) if s_ >= 0.08]
+            found = analyze.color_matches(qp["color"], set(cands))
+            target = None
+            scored = []
+            for i in ids:
+                if i in found:
+                    scored.append((found[i][0], i))
+                    if i not in hits:   # show the slide / moment where the color is
+                        hits[i] = (found[i][1], found[i][2])
+                elif not analyze.color_profiled(i):   # not profiled yet: fall back to the cover's palette
+                    target = target if target is not None else analyze.hex_to_lab(qp["color"])
+                    sc = analyze.color_score(cands[i], target)
+                    if sc >= 0.08:
+                        scored.append((sc * 0.5, i))
+            ids = [i for _, i in scored] if ranked is not None else [i for _, i in sorted(scored, key=lambda t: -t[0])]
         return ids, hits, True
     order = SORTS.get(qp.get("sort", "saved"), SORTS["saved"])
     shuffle = qp.get("sort") == "random" and qp.get("seed")

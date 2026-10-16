@@ -636,7 +636,9 @@ code { font-family: var(--mono); font-size: var(--fs-xs); background: var(--cell
 #selbar .selstar.on:hover { color: var(--paper); }
 /* shuffle again / back */
 .sort-cell { display: flex; align-items: stretch; }
-.sort-cell .shuf { border: 0; border-left: 1px solid var(--rule-soft); padding: 0 10px; display: flex; align-items: center; }
+.sort-cell .shuf { border: 0; padding: 0 5px; display: flex; align-items: center; }
+.sort-cell #reshuffle { border-left: 1px solid var(--rule-soft); padding-left: 10px; }
+.sort-cell .shuf:last-child { padding-right: 10px; }
 .sort-cell .shuf svg { width: 15px; height: 15px; display: block; }
 .tile .box:has(.nomatch) .favstar { top: 26px; }
 
