@@ -291,6 +291,7 @@ function setFilter(f, keepQuery = true) {
   clearSelection();
   $("#side").classList.remove("open");
   reload();
+  navCommit();
 }
 
 // ---------------- sidebar ----------------
@@ -308,7 +309,7 @@ async function loadSidebar() {
 function updateFilter(patch) {
   S.filter = { ...S.filter, ...patch };
   for (const k in S.filter) if (!S.filter[k]) delete S.filter[k];
-  writeHash(); clearSelection(); reload();
+  writeHash(); clearSelection(); reload(); navCommit();
 }
 function navItem(label, n, f, extra = {}, cls = "") {
   const on = JSON.stringify(f) === JSON.stringify(Object.fromEntries(Object.entries(S.filter).filter(([k]) => NAV_KEYS.includes(k))));
@@ -724,8 +725,10 @@ function tile(p, i, ratio) {
   });
   box.append(h("span", { class: "selbox", role: "checkbox", "aria-label": "Select", title: "Select (or ⌘-click the tile)",
     onclick: (e) => { e.stopPropagation(); e.preventDefault(); toggleSelect(p.id, el, e.shiftKey ? i : null); } }));
-  box.append(h("span", { class: "favstar", role: "button", title: "Favorite (click to remove)",
-    onclick: (e) => { e.stopPropagation(); e.preventDefault(); setFavorite([p.id], false); } }, "★"));
+  const star = h("span", { class: "favstar", role: "button", title: "Favorite", "aria-label": "Favorite",
+    onclick: (e) => { e.stopPropagation(); e.preventDefault(); const it = S.items.find((x) => x.id === p.id) || p; setFavorite([p.id], !it.favorite); } });
+  star.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 2.8l2.75 5.9 6.45.75-4.78 4.4 1.3 6.37L12 17.02l-5.72 3.2 1.3-6.37L2.8 9.45l6.45-.75z"/></svg>';
+  box.append(star);
   if (searchActive() && S.aiOn) {
     box.append(h("span", { class: "nomatch", role: "button", title: "Not what I searched for: hide it and teach search", onclick: (e) => { e.stopPropagation(); notAMatch(p); } }, "Not a match"));
   }
@@ -917,17 +920,21 @@ function notAMatch(p) {
 const V = { video: null };
 async function openViewer(i) {
   if (i < 0 || i >= S.items.length) return;
+  const wasOpen = !$("#viewer").hidden;
   S.viewerIndex = i; S.inPt = S.outPt = null;
   const hit = S.items[i].hit;
   S.slide = hit ? hit.idx : 0;
   S.seekTo = hit && hit.t >= 0.5 ? hit.t : null;
   $("#viewer").hidden = false; document.body.style.overflow = "hidden";
   const id = S.items[i].id;
+  wasOpen ? navReplace() : navCommit();   // stepping through posts updates this spot; opening one is a new step
   S.post = await api(`/api/posts/${id}`);
   if (S.items[S.viewerIndex]?.id !== id) return;
   renderStage(); renderInfo();
   if (i >= S.items.length - 6) loadMore();
 }
+// closing it yourself (Esc, Close) is like going back; closing it to jump somewhere else isn't
+function userCloseViewer() { closeViewer(); navClosed(); }
 function closeViewer() {
   $("#viewer").hidden = true; document.body.style.overflow = "";
   if (V.video) V.video.pause();
@@ -1127,6 +1134,7 @@ function renderInfo() {
   const total = S.total || S.items.length;
   fill(info,
     h("div", { class: "head-row" },
+      navPair(),
       h("span", { class: "pos" }, `${pad(S.viewerIndex + 1)} / ${pad(total)}`),
       h("button", { class: "fav-btn" + (p.favorite ? " on" : ""), title: "Favorite (F)", "aria-pressed": p.favorite ? "true" : "false", onclick: () => save({ favorite: !p.favorite }) }, p.favorite ? "★ Favorite" : "☆ Favorite")),
     h("div", { class: "spec" },
@@ -1180,7 +1188,7 @@ function renderInfo() {
     h("div", { class: "grow" }),
     h("div", { class: "navbar" },
       h("button", { onclick: () => openViewer(S.viewerIndex - 1), disabled: S.viewerIndex <= 0 }, "Previous"),
-      h("button", { onclick: closeViewer }, "Close"),
+      h("button", { onclick: userCloseViewer }, "Close"),
       h("button", { onclick: () => openViewer(S.viewerIndex + 1), disabled: S.viewerIndex >= total - 1 }, "Next")),
   );
   updateDeck();
@@ -1537,7 +1545,7 @@ $("#q").addEventListener("input", () => {
   clearTimeout(qTimer);
   qTimer = setTimeout(() => { S.filter.q = $("#q").value.trim(); if (!S.filter.q) delete S.filter.q; writeHash(); reload(); }, 220);
 });
-$("#sort").onchange = () => { S.sort = $("#sort").value; S.seed = Math.floor(Math.random() * 1e6); S.seeds = []; shuffleUI(); try { localStorage.setItem("sf-sort", S.sort); } catch {} reload(); };
+$("#sort").onchange = () => { S.sort = $("#sort").value; S.seed = Math.floor(Math.random() * 1e6); S.seeds = []; shuffleUI(); try { localStorage.setItem("sf-sort", S.sort); } catch {} reload(); navCommit(); };
 // Shuffle: deal again, or go back to the one before
 function shuffleUI() {
   $("#reshuffle").hidden = S.sort !== "random";
@@ -1560,7 +1568,7 @@ document.addEventListener("keydown", (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     const multi = S.post?.media.length > 1;
     const keys = {
-      escape: closeViewer,
+      escape: userCloseViewer,
       arrowright: () => { if (S.viewerIndex < S.items.length - 1) openViewer(S.viewerIndex + 1); },
       arrowleft: () => { if (S.viewerIndex > 0) openViewer(S.viewerIndex - 1); },
       " ": togglePlay, i: toggleIn, o: toggleOut, p: togglePreview, g: grabFrame, m: toggleMute,
@@ -1578,7 +1586,90 @@ document.addEventListener("keydown", (e) => {
   else if (e.key === "Escape") { if (!$("#drawer").hidden) closeDrawer(); else clearSelection(); }
   else if ((e.key === "Delete" || e.key === "Backspace") && S.selected.size && $("#drawer").hidden) { e.preventDefault(); trashSelected(); }
 });
-window.addEventListener("hashchange", () => { readHash(); reload(); renderSidebar(); });
+window.addEventListener("hashchange", () => { readHash(); reload(); renderSidebar(); navCommit(); });
+
+// ---------------- back / forward ----------------
+// one trail through everything: library views, searches, posts and moodboards. ⌘[ and ⌘] work too.
+const NAV = { stack: [], i: -1, restoring: false };
+function navNow() {
+  return { filter: { ...S.filter }, sort: S.sort, seed: S.seed,
+    post: $("#viewer").hidden ? null : (S.items[S.viewerIndex]?.id ?? S.post?.id ?? null),
+    board: typeof Board !== "undefined" && !$("#board").hidden ? Board.current() : null };
+}
+const navKey = (e) => e ? JSON.stringify([e.filter, e.sort, e.sort === "random" ? e.seed : 0, e.post, e.board]) : "";
+function navCommit() {
+  if (NAV.restoring) return;
+  const now = navNow(), cur = NAV.stack[NAV.i];
+  if (cur && navKey(cur) === navKey(now)) return;
+  NAV.stack = NAV.stack.slice(0, NAV.i + 1);
+  NAV.stack.push({ ...now, y: 0 });
+  if (NAV.stack.length > 200) NAV.stack.shift();
+  NAV.i = NAV.stack.length - 1;
+  navButtons();
+}
+function navReplace() {
+  if (NAV.restoring || !NAV.stack[NAV.i]) return navCommit();
+  NAV.stack[NAV.i] = { ...navNow(), y: NAV.stack[NAV.i].y };
+  navButtons();
+}
+// closing a post or moodboard: step back if that's where you came from, so Forward can reopen it
+function navClosed() {
+  if (NAV.restoring) return;
+  const prev = NAV.stack[NAV.i - 1];
+  if (prev && navKey(prev) === navKey(navNow())) { NAV.i--; navButtons(); }
+  else navReplace();
+}
+window.navCommit = navCommit; window.navClosed = navClosed;
+window.addEventListener("scroll", () => {
+  if (window.scrollX) window.scrollTo(0, window.scrollY);   // the app never sits shifted sideways
+  if (!NAV.restoring && $("#viewer").hidden && $("#board").hidden && NAV.stack[NAV.i]) NAV.stack[NAV.i].y = window.scrollY;
+}, { passive: true });
+const until = (fn, ms = 8000) => new Promise((res) => { const t0 = Date.now(); (function tick() { if (fn() || Date.now() - t0 > ms) res(); else setTimeout(tick, 40); })(); });
+async function navGo(dir) {
+  const j = NAV.i + dir, e = NAV.stack[j];
+  if (!e || NAV.restoring) return;
+  NAV.restoring = true; NAV.i = j; navButtons();
+  try {
+    if (e.board) { if (Board.current() !== e.board) { if (!$("#viewer").hidden) closeViewer(); await Board.open(e.board); } return; }
+    if (!$("#board").hidden) await Board.close(true);
+    const same = navKey({ ...e, post: null, board: null }) === navKey({ ...navNow(), post: null, board: null });
+    if (!same) {
+      if (!$("#viewer").hidden) closeViewer();
+      S.filter = { ...e.filter }; S.sort = e.sort; S.seed = e.seed;
+      $("#sort").value = e.sort; shuffleUI();
+      $("#q").value = S.filter.q || ""; renderChips(); writeHash(); clearSelection(); renderSidebar(); renderFilters?.();
+      reload();
+      // load far enough down to land where you were
+      await until(() => !S.loading && (!S.more || document.documentElement.scrollHeight > e.y + innerHeight));
+    }
+    if (e.post) {
+      let k = S.items.findIndex((x) => x.id === e.post);
+      for (let n = 0; k < 0 && S.more && n < 20; n++) { await until(() => !S.loading); await loadMore(); k = S.items.findIndex((x) => x.id === e.post); }
+      if (!$("#viewer").hidden && S.post?.id === e.post) return;
+      if (k >= 0) await openViewer(k);
+    } else {
+      if (!$("#viewer").hidden) closeViewer();
+      window.scrollTo(0, e.y);
+    }
+  } finally { NAV.restoring = false; }
+}
+function navButtons() {
+  document.querySelectorAll(".nav-back").forEach((b) => { b.disabled = NAV.i <= 0; });
+  document.querySelectorAll(".nav-fwd").forEach((b) => { b.disabled = NAV.i >= NAV.stack.length - 1; });
+}
+function navPair(cls = "") {
+  return h("div", { class: "navpair " + cls },
+    h("button", { class: "nav-back", title: "Back (⌘[)", "aria-label": "Back", disabled: NAV.i <= 0, onclick: () => navGo(-1) }, "←"),
+    h("button", { class: "nav-fwd", title: "Forward (⌘])", "aria-label": "Forward", disabled: NAV.i >= NAV.stack.length - 1, onclick: () => navGo(1) }, "→"));
+}
+$("#menuBtn").after(navPair("cell"));
+$("#boardClose").before(navPair("cell"));
+document.addEventListener("keydown", (e) => {
+  if (!(e.metaKey || e.ctrlKey) || $("#modalRoot").children.length) return;
+  if (e.key === "[") { e.preventDefault(); e.stopImmediatePropagation(); navGo(-1); }
+  else if (e.key === "]") { e.preventDefault(); e.stopImmediatePropagation(); navGo(1); }
+}, true);
+window.addEventListener("mouseup", (e) => { if (e.button === 3) navGo(-1); else if (e.button === 4) navGo(1); });
 
 const setView = (v) => { S.view = v; try { localStorage.setItem("sf-view", v); } catch {} layout(true); };
 $("#viewIndex").onclick = () => setView("index");
@@ -1655,6 +1746,7 @@ try {
   const vw = localStorage.getItem("sf-view"); if (vw === "frames" || vw === "index") S.view = vw;
 } catch {}
 readHash();
+navCommit();
 if (S.filter.simimg) { delete S.filter.simimg; writeHash(); }
 loadSidebar().then(() => { reload(); });
 pollJobs();

@@ -625,10 +625,12 @@ code { font-family: var(--mono); font-size: var(--fs-xs); background: var(--cell
 .color-pop .hex-in.bad { color: var(--danger); }
 .color-pop .hex-row .menu-clear { border-left: 1px solid var(--rule); }
 
-/* favorite star on tiles: shows on hover, like the checkbox */
-.tile .favstar { position: absolute; right: 6px; top: 4px; z-index: 6; display: none; color: var(--signal); font-size: 14px; line-height: 1; cursor: pointer; text-shadow: 0 0 3px rgba(0,0,0,.6); }
-.tile.fav:hover .favstar { display: block; }
-.tile .favstar:hover { color: #fff; }
+/* favorite star on tiles: an outline on hover; orange and filled once it's a favorite */
+.tile .favstar { position: absolute; right: 5px; top: 5px; z-index: 6; display: none; width: 16px; height: 16px; cursor: pointer; filter: drop-shadow(0 0 2px rgba(0,0,0,.7)); }
+.tile .favstar svg { width: 16px; height: 16px; display: block; fill: none; stroke: #fff; stroke-width: 1.8; stroke-linejoin: round; }
+.tile:hover .favstar { display: block; }
+.tile .favstar:hover svg { stroke: var(--signal); }
+.tile.fav .favstar svg { fill: var(--signal); stroke: var(--signal); }
 /* star in the selection bar */
 #selbar .selstar { font-size: 14px; padding: 4px 9px; line-height: 1; }
 #selbar .selstar.on { color: var(--signal); }
@@ -637,3 +639,14 @@ code { font-family: var(--mono); font-size: var(--fs-xs); background: var(--cell
 .sort-cell { display: flex; align-items: stretch; }
 .sort-cell .shuf { border: 0; border-left: 1px solid var(--rule-soft); padding: 0 10px; font-size: 14px; text-transform: none; }
 .tile .box:has(.nomatch) .favstar { top: 26px; }
+
+/* back / forward */
+.navpair { display: flex; align-items: stretch; padding: 0 !important; }
+.navpair button { border: 0; padding: 0 9px; font-size: 14px; text-transform: none; line-height: 1; }
+.navpair button + button { border-left: 1px solid var(--rule-soft); }
+.navpair button:disabled { opacity: .3; cursor: default; background: none; color: inherit; }
+.info .head-row .navpair { border-right: 1px solid var(--rule); }
+.info .head-row .navpair button { padding: 0 12px; border-left: 0; }
+.info .head-row .navpair button + button { border-left: 1px solid var(--rule-soft); }
+/* never scroll sideways */
+html, body, .app { overflow-x: clip; }

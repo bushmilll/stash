@@ -65,13 +65,15 @@ const Board = (() => {
     render();
     requestAnimationFrame(() => render());   // fonts and sizes settle after the first paint
     loopTick();
+    window.navCommit?.();
   }
-  async function close() {
+  async function close(quiet) {
     if (!B) return;
     await flush();
     $("#board").hidden = true; document.body.style.overflow = "";
     B = null; selected = null; els = new Map(); fill($("#paper")); clipPanel();
     loadSidebar();
+    if (!quiet) window.navClosed?.();
   }
   async function create() {
     const name = await askText("New moodboard", { value: "Untitled moodboard", label: "Create" });
@@ -880,7 +882,7 @@ const Board = (() => {
     document.querySelectorAll("[data-pages]").forEach((b) => { b.onclick = () => set({ pages: b.dataset.pages }); });
     $("#rowsRange").oninput = () => { $("#rowsVal").textContent = $("#rowsRange").value; set({ rows: Number($("#rowsRange").value) }); };
     $("#colsRange").oninput = () => { $("#colsVal").textContent = $("#colsRange").value; set({ cols: Number($("#colsRange").value) }); };
-    $("#boardClose").onclick = close;
+    $("#boardClose").onclick = () => close();
     document.querySelectorAll("[data-ly]").forEach((b) => { b.onclick = () => setLayout(b.dataset.ly); });
     document.querySelectorAll("[data-title]").forEach((b) => { b.onclick = () => set(b.dataset.title === "off" ? { show_title: false } : { show_title: true, title_pos: b.dataset.title }); });
     document.querySelectorAll("[data-cap]").forEach((b) => { b.onclick = () => set({ captions: b.dataset.cap }); });
@@ -938,5 +940,5 @@ const Board = (() => {
     }, true);
   }
   init();
-  return { open, create, close };
+  return { open, create, close, current: () => (B ? B.id : null) };
 })();
