@@ -222,6 +222,9 @@ async def list_posts(request):
             if h_:
                 items.append(_with_hit(c, rows[i], h_[0], h_[1] or 0))
                 continue
+        if qp.get("favorite") and (rows[i]["fav_idx"] or 0) > 0:   # Favorites shows the slide you favorited
+            items.append(_with_hit(c, rows[i], rows[i]["fav_idx"], 0))
+            continue
         items.append(db.post_dict(c, rows[i]))
     return JSONResponse({"items": items, "more": offset + limit < len(ids), "total": len(ids) if offset == 0 else None})
 
@@ -303,6 +306,8 @@ async def update_post(request):
             c.execute("UPDATE posts SET notes=? WHERE id=?", (str(body["notes"])[:20000], pid))
         if "favorite" in body:
             c.execute("UPDATE posts SET favorite=? WHERE id=?", (1 if body["favorite"] else 0, pid))
+        if "fav_idx" in body:
+            c.execute("UPDATE posts SET fav_idx=? WHERE id=?", (max(0, int(body["fav_idx"] or 0)), pid))
         for name in body.get("add_tags", []):
             if name.strip():
                 tid = db.get_or_create(c, "tags", name.strip().lstrip("#"))

@@ -1138,7 +1138,14 @@ function renderInfo() {
     h("div", { class: "head-row" },
       navPair(),
       h("span", { class: "pos" }, `${pad(S.viewerIndex + 1)} / ${pad(total)}`),
-      h("button", { class: "fav-btn" + (p.favorite ? " on" : ""), title: "Favorite (F)", "aria-pressed": p.favorite ? "true" : "false", onclick: () => save({ favorite: !p.favorite }) }, p.favorite ? "★ Favorite" : "☆ Favorite")),
+      (() => {
+        // on a carousel, the slide you favorite is the one Favorites shows; on another slide, the button moves it here
+        const multi = p.media.length > 1, other = p.favorite && multi && (p.fav_idx || 0) !== S.slide;
+        const on = p.favorite && !other;
+        return h("button", { class: "fav-btn" + (on ? " on" : ""), title: "Favorite (F)", "aria-pressed": on ? "true" : "false",
+          onclick: () => save(other ? { fav_idx: S.slide } : { favorite: !p.favorite, fav_idx: S.slide }) },
+          on ? "★ Favorite" : other ? "☆ Favorite this slide" : "☆ Favorite");
+      })()),
     h("div", { class: "spec" },
       ...spec("Creator", p.username ? h("a", { href: "#", onclick: (e) => { e.preventDefault(); closeViewer(); setFilter({ creator: p.username }, false); } }, "@" + p.username) : "–"),
       ...spec("Saved", fmtDay(p.saved_at)),

@@ -174,6 +174,8 @@ def init():
         cols = {r[1] for r in c.execute("PRAGMA table_info(posts)")}
         if "deleted_at" not in cols:
             c.execute("ALTER TABLE posts ADD COLUMN deleted_at INTEGER")
+        if "fav_idx" not in cols:   # which slide of a carousel you favorited
+            c.execute("ALTER TABLE posts ADD COLUMN fav_idx INTEGER DEFAULT 0")
         if "saved_src" not in cols:
             # where the "saved" time came from: 'export' = real date from Instagram's data export,
             # 'feed' = estimated from the order of the collection feed. Older rows: an export date is
