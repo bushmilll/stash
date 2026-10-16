@@ -183,9 +183,13 @@ async def matching_ids(qp, skip=()):
                 [i for s_, i in sorted(scored, key=lambda t: -t[0]) if s_ >= 0.08]
         return ids, hits, True
     order = SORTS.get(qp.get("sort", "saved"), SORTS["saved"])
-    if qp.get("sort") == "random" and qp.get("seed"):
-        order = f"(p.id * 2654435761 + {int(qp['seed']) % 100003}) % 1000003"   # stable shuffle across pages
+    shuffle = qp.get("sort") == "random" and qp.get("seed")
+    if shuffle:
+        order = "p.id"
     ids = [r[0] for r in c.execute(f"SELECT p.id FROM posts p {' '.join(joins)} {_sql_where(where)} ORDER BY {order}", args)]
+    if shuffle:   # a real shuffle; the same seed always deals the same order, so paging and "back" work
+        import random
+        random.Random(int(qp["seed"])).shuffle(ids)
     return ids, hits, False
 
 
@@ -323,6 +327,8 @@ async def bulk(request):
     body = await request.json()
     ids = [int(i) for i in body.get("ids", [])][:5000]
     with db.tx() as c:
+        if "favorite" in body:
+            c.executemany("UPDATE posts SET favorite=? WHERE id=?", [(1 if body["favorite"] else 0, pid) for pid in ids])
         for pid in ids:
             for name in body.get("add_tags", []):
                 tid = db.get_or_create(c, "tags", name.strip().lstrip("#"))

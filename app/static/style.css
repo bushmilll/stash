@@ -52,6 +52,9 @@
 
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
+/* no sideways scrolling or sideways rubber-band anywhere in the app */
+html { overflow-x: hidden; overscroll-behavior-x: none; }
+body { overscroll-behavior-x: none; }
 body {
   background: var(--paper); color: var(--ink);
   font: 400 var(--fs-m)/1.35 var(--sans);
@@ -621,3 +624,16 @@ code { font-family: var(--mono); font-size: var(--fs-xs); background: var(--cell
 .color-pop .hex-in { flex: 1; min-width: 0; border: 0; padding: 6px 8px; font: 400 12px var(--mono); text-transform: uppercase; background: none; }
 .color-pop .hex-in.bad { color: var(--danger); }
 .color-pop .hex-row .menu-clear { border-left: 1px solid var(--rule); }
+
+/* favorite star on tiles: shows on hover, like the checkbox */
+.tile .favstar { position: absolute; right: 6px; top: 4px; z-index: 6; display: none; color: var(--signal); font-size: 14px; line-height: 1; cursor: pointer; text-shadow: 0 0 3px rgba(0,0,0,.6); }
+.tile.fav:hover .favstar { display: block; }
+.tile .favstar:hover { color: #fff; }
+/* star in the selection bar */
+#selbar .selstar { font-size: 14px; padding: 4px 9px; line-height: 1; }
+#selbar .selstar.on { color: var(--signal); }
+#selbar .selstar.on:hover { color: var(--paper); }
+/* shuffle again / back */
+.sort-cell { display: flex; align-items: stretch; }
+.sort-cell .shuf { border: 0; border-left: 1px solid var(--rule-soft); padding: 0 10px; font-size: 14px; text-transform: none; }
+.tile .box:has(.nomatch) .favstar { top: 26px; }

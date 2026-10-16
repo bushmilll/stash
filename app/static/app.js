@@ -196,7 +196,9 @@ const DESKTOP = new URLSearchParams(location.search).has("app");
     { value: "saved", label: "Newest saves" }, { value: "saved_old", label: "Oldest saves" },
     { value: "posted", label: "Newest posts" }, { value: "random", label: "Shuffle" }] });
   sort.id = "sort"; sort.classList.add("plain-on");
-  document.getElementById("sortCell").append(sort);
+  const again = h("button", { id: "reshuffle", class: "shuf", title: "Shuffle again", hidden: true }, "↻");
+  const back = h("button", { id: "unshuffle", class: "shuf", title: "Back to the last shuffle", hidden: true }, "↶");
+  document.getElementById("sortCell").append(sort, again, back);
 }
 function openExternal(url) {
   if (DESKTOP) api("/api/desktop/open-url", { method: "POST", body: { url } }).catch((e) => toast(esc(e.message), { error: true }));
@@ -702,7 +704,7 @@ function tile(p, i, ratio) {
   const box = h("span", { class: "box" }, m.thumb_src ? (m.hit_src ? h("img", { src: m.hit_src, loading: "lazy", decoding: "async", alt: "" }) : sharpImg(m)) : null);
   if (hit && m.kind === "video" && hit.t >= 0.5) box.append(h("span", { class: "hitchip", title: "Where your search shows up" }, "▶ " + fmtTime(hit.t).replace(/\.\d\d$/, "")));
   else if (hit && p.media_count > 1) box.append(h("span", { class: "hitchip" }, `${hit.idx + 1} / ${p.media_count}`));
-  const el = h("button", { class: "tile" + (S.selected.has(p.id) ? " sel" : ""), "data-id": p.id, draggable: "true", "aria-label": `Post ${i + 1} by ${p.username || "unknown"}` }, box);
+  const el = h("button", { class: "tile" + (S.selected.has(p.id) ? " sel" : "") + (p.favorite ? " fav" : ""), "data-id": p.id, draggable: "true", "aria-label": `Post ${i + 1} by ${p.username || "unknown"}` }, box);
   if (S.view === "index") {
     el.append(h("span", { class: "cap" }, h("span", { class: "n" }, num), h("span", { class: "k" }, (p.favorite ? "★ " : "") + kindLabel(p))),
       h("span", { class: "who" }, p.username ? "@" + p.username : p.shortcode));
@@ -722,6 +724,8 @@ function tile(p, i, ratio) {
   });
   box.append(h("span", { class: "selbox", role: "checkbox", "aria-label": "Select", title: "Select (or ⌘-click the tile)",
     onclick: (e) => { e.stopPropagation(); e.preventDefault(); toggleSelect(p.id, el, e.shiftKey ? i : null); } }));
+  box.append(h("span", { class: "favstar", role: "button", title: "Favorite (click to remove)",
+    onclick: (e) => { e.stopPropagation(); e.preventDefault(); setFavorite([p.id], false); } }, "★"));
   if (searchActive() && S.aiOn) {
     box.append(h("span", { class: "nomatch", role: "button", title: "Not what I searched for: hide it and teach search", onclick: (e) => { e.stopPropagation(); notAMatch(p); } }, "Not a match"));
   }
@@ -808,6 +812,15 @@ function toggleSelect(id, el, rangeIndex) {
   document.querySelectorAll(".tile").forEach((t) => t.classList.toggle("sel", S.selected.has(Number(t.dataset.id))));
   renderSelbar();
 }
+// favorite or unfavorite posts and update their tiles where they sit
+async function setFavorite(ids, on) {
+  await api("/api/posts/bulk", { method: "POST", body: { ids, favorite: on } });
+  for (const id of ids) {
+    const it = S.items.find((x) => x.id === id); if (it) it.favorite = on ? 1 : 0;
+    document.querySelectorAll(`#grid .tile[data-id="${id}"]`).forEach((t) => t.classList.toggle("fav", on));
+  }
+  loadSidebar();
+}
 async function trashSelected() {
   const moved = [...S.selected];
   if (!moved.length || S.filter.trashed) return;
@@ -867,7 +880,10 @@ function renderSelbar() {
       clearSelection(); loadSidebar();
     }
   };
-  fill(bar, count, input, h("button", { onclick: add }, "Add"),
+  const allFav = ids().every((id) => S.items.find((x) => x.id === id)?.favorite);
+  const star = h("button", { class: "selstar" + (allFav ? " on" : ""), title: allFav ? "Remove from Favorites" : "Add to Favorites", "aria-label": "Favorite",
+    onclick: async () => { await setFavorite(ids(), !allFav); toast(allFav ? `Removed ${n} from <b>Favorites</b>` : `Added ${n} to <b>Favorites</b>`); renderSelbar(); } }, "★");
+  fill(bar, count, star, input, h("button", { onclick: add }, "Add"),
     S.filter.collection ? h("button", { class: "ghost", onclick: async () => {
       await api("/api/posts/bulk", { method: "POST", body: { ids: ids(), remove_collections: [S.filter.collection] } });
       toast(`Removed ${n} from <b>${esc(S.filter.collection)}</b>`); done(); } }, "Remove from this one") : null,
@@ -1001,8 +1017,11 @@ function togglePreview() {
     const r = scrub.getBoundingClientRect();
     v.currentTime = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * (v.duration || 0);
   };
-  scrub.addEventListener("pointerdown", (e) => { scrub.setPointerCapture(e.pointerId); V.video?.pause(); seek(e); scrub.onpointermove = seek; });
-  scrub.addEventListener("pointerup", () => { scrub.onpointermove = null; });
+  // hold still while you drag, then carry on playing from where you let go (if it was playing)
+  let resume = false;
+  scrub.addEventListener("pointerdown", (e) => { scrub.setPointerCapture(e.pointerId); resume = !!V.video && !V.video.paused; V.video?.pause(); seek(e); scrub.onpointermove = seek; });
+  const up = () => { scrub.onpointermove = null; if (resume && V.video) V.video.play().catch(() => {}); resume = false; };
+  scrub.addEventListener("pointerup", up); scrub.addEventListener("pointercancel", up);
 })();
 $("#play").onclick = togglePlay;
 $("#stepBack").onclick = () => step(-1);
@@ -1054,6 +1073,7 @@ function renderInfo() {
     S.post = await api(`/api/posts/${p.id}`, { method: "PATCH", body });
     const item = S.items[S.viewerIndex];
     if (item && item.id === p.id) Object.assign(item, { favorite: S.post.favorite });
+    document.querySelectorAll(`#grid .tile[data-id="${p.id}"]`).forEach((t) => t.classList.toggle("fav", !!S.post.favorite));
     renderInfo(); loadSidebar();
   };
   const chipList = (names, kind) => names.length ? h("div", { class: "chips" }, ...names.map((n) =>
@@ -1517,7 +1537,15 @@ $("#q").addEventListener("input", () => {
   clearTimeout(qTimer);
   qTimer = setTimeout(() => { S.filter.q = $("#q").value.trim(); if (!S.filter.q) delete S.filter.q; writeHash(); reload(); }, 220);
 });
-$("#sort").onchange = () => { S.sort = $("#sort").value; S.seed = Math.floor(Math.random() * 1e6); try { localStorage.setItem("sf-sort", S.sort); } catch {} reload(); };
+$("#sort").onchange = () => { S.sort = $("#sort").value; S.seed = Math.floor(Math.random() * 1e6); S.seeds = []; shuffleUI(); try { localStorage.setItem("sf-sort", S.sort); } catch {} reload(); };
+// Shuffle: deal again, or go back to the one before
+function shuffleUI() {
+  $("#reshuffle").hidden = S.sort !== "random";
+  $("#unshuffle").hidden = S.sort !== "random" || !(S.seeds || []).length;
+}
+$("#reshuffle").onclick = () => { (S.seeds = S.seeds || []).push(S.seed); S.seed = Math.floor(Math.random() * 1e6); shuffleUI(); reload(); window.scrollTo(0, 0); };
+$("#unshuffle").onclick = () => { if (!S.seeds?.length) return; S.seed = S.seeds.pop(); shuffleUI(); reload(); window.scrollTo(0, 0); };
+shuffleUI();
 $("#density").oninput = () => { try { localStorage.setItem("sf-size", $("#density").value); } catch {} layout(true); };
 $("#menuBtn").onclick = () => $("#side").classList.toggle("open");
 let resizeT; window.addEventListener("resize", () => { clearTimeout(resizeT); resizeT = setTimeout(() => layout(false), 120); });
@@ -1620,7 +1648,7 @@ $("#updateBtn").onclick = updateDialog;
 
 // boot
 try {
-  const so = localStorage.getItem("sf-sort"); if (so) { S.sort = so; $("#sort").value = so; }
+  const so = localStorage.getItem("sf-sort"); if (so) { S.sort = so; $("#sort").value = so; shuffleUI(); }
   const sz = localStorage.getItem("sf-size"), old = localStorage.getItem("sf-density");
   if (sz) $("#density").value = sz; else if (old) $("#density").value = 11 - Number(old);   // flip the old setting
   else $("#density").value = 6;
