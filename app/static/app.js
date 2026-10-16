@@ -1474,15 +1474,25 @@ function renderDrawer(focus) {
 
   const aiBody = h("div", {}, h("div", { class: "stat-line" }, "…"));
   const aiSec = h("section", { id: "sec-ai" }, h("h3", {}, "AI search & tags"),
-    h("p", {}, "Search for what's in your saves, not just their captions: “flower”, “red neon at night”, “overhead shot of a table”. Stash looks at every image and about one frame a second of every video, and video results open at the moment that matches. It also tags what each save is (film frame, talking to camera, behind the scenes, gear, text) for the Content filter. Everything runs on this Mac; turning it on downloads a 150 MB model once and scans your library in the background."),
+    h("p", {}, "Search for what's in your saves, not just their captions: “flower”, “red neon at night”, “overhead shot of a table”. Stash looks at every image and through every video, and video results open at the moment that matches. It also tags what each save is (film frame, talking to camera, behind the scenes, gear, text) and the shot (frame size, angle, look) for the filters. Everything runs on this Mac; turning it on downloads Google's SigLIP 2 model once (about 650 MB) and scans your library in the background."),
     aiBody);
   let aiTimer;
   const loadAI = () => api("/api/ai").then((a) => {
     clearTimeout(aiTimer);
     S.aiOn = a.enabled && a.installed;
-    const line = a.downloading ? `Downloading model… ${Math.round(a.progress * 100)}%`
-      : a.enabled && a.installed ? `Scanned ${a.scanned.toLocaleString()} of ${a.total.toLocaleString()} images and videos` + (a.scanned < a.total ? " (keeps going in the background, search improves as it goes)" : ". Search looks inside everything.")
+    const line = a.downloading ? `Downloading ${a.downloading_model || "the AI model"}… ${Math.round(a.progress * 100)}%`
+      : a.enabled && a.installed ? `${a.model_label}: scanned ${a.scanned.toLocaleString()} of ${a.total.toLocaleString()} images and videos` + (a.scanned < a.total ? " (keeps going in the background, search improves as it goes)" : ". Search looks inside everything.")
       : "Off";
+    // moving to a newer model: it scans in the background while the current one keeps working, then takes over
+    const up = a.enabled && a.upgrade ? h("div", { class: "stat-line" },
+      a.upgrade.installed
+        ? `Upgrading to ${a.upgrade.label}: ${a.upgrade.done.toLocaleString()} of ${a.upgrade.total.toLocaleString()} scanned. Search keeps using ${a.model_label} until it's done, then switches over.`
+        : `${a.upgrade.label} (the newer, sharper model) downloads next, then scans in the background while ${a.model_label} keeps working.`) : null;
+    const swap = a.enabled && a.installed ? (a.switch_to || []).map((m) => h("button", { class: "ghost", onclick: async () => {
+      const back = m.model !== "siglip2-b16";
+      if (back && !(await askConfirm(`Switch back to ${m.label}?`, { text: `Search and tags go back to the previous model right away (its scan is still here). Your collections, favorites, tags and everything search has learned stay as they are. You can switch to the new model again any time.`, label: `Use ${m.label}` }))) return;
+      await api("/api/ai/model", { method: "POST", body: { model: m.model } }); toast(`Search now uses ${m.label}`); reload(); loadAI();
+    } }, m.model === "siglip2-b16" ? `Use ${m.label} again` : `Previous model (${m.label})`)) : [];
     const learnLine = h("div", { class: "hint" });
     api("/api/techniques").then((t) => {
       const l = t.learned;
@@ -1490,6 +1500,7 @@ function renderDrawer(focus) {
     }).catch(() => {});
     fill(aiBody,
       h("div", { class: "stat-line" }, line),
+      up, ...swap,
       a.enabled && a.installed ? learnLine : null,
       a.enabled && a.installed ? h("button", { class: "ghost", onclick: async () => {
         if (!(await askConfirm("Reset what search has learned?", { text: "Searches go back to the AI on its own. Technique tags you set by hand stay.", label: "Reset", danger: true }))) return;
@@ -1499,7 +1510,7 @@ function renderDrawer(focus) {
       a.enabled && (a.installed || a.downloading)
         ? h("button", { onclick: async () => { await api("/api/ai/toggle", { method: "POST", body: { enabled: false } }); loadAI(); } }, "Turn off")
         : h("button", { class: "primary", onclick: async () => { await api("/api/ai/toggle", { method: "POST", body: { enabled: true } }); toast("Downloading the AI model"); loadAI(); } }, "Turn on AI search"));
-    if (!$("#drawer").hidden && (a.downloading || (a.enabled && a.installed && a.tagged < a.total))) aiTimer = setTimeout(loadAI, 3000);
+    if (!$("#drawer").hidden && (a.downloading || a.upgrade || (a.enabled && a.installed && a.tagged < a.total))) aiTimer = setTimeout(loadAI, 3000);
   }).catch(() => fill(aiBody));
   loadAI();
 

@@ -149,8 +149,21 @@ SHARE = 0.3         # a video gets a tag when this share of its frames show it
 _prompts = {}
 
 
+def model_changed():
+    """A different AI model took over: re-read the AI tags (camera movement is measured from pixels, so it's kept)."""
+    _prompts.clear()
+    _stats.update(n=-1)
+    with db.tx() as w:
+        w.execute("UPDATE analysis SET tech_version=-1 WHERE COALESCE(tech_version,0) >= 1")
+    schedule_relearn(5)
+
+
 def _prompt_vectors():
-    if not _prompts:
+    from . import ai
+    if _prompts.get("_model") != ai.active():
+        _prompts.clear()
+        _prompts["_model"] = ai.active()
+    if len(_prompts) <= 1:
         from . import ai
         for g, classes in EXCLUSIVE.items():
             keys = list(classes)
@@ -185,16 +198,18 @@ def _raw(vecs):
     """Per frame: binary tags as logit differences, exclusive classes as probabilities. -> {tag: array}"""
     P = _prompt_vectors()
     out = {}
+    from . import ai
+    scale = ai.cfg()["scale"]
     for g in EXCLUSIVE:
         keys, M = P[g]
-        lg = 100.0 * vecs @ _norm(M).T
+        lg = scale * vecs @ _norm(M).T
         p = np.exp(lg - lg.max(axis=1, keepdims=True)); p /= p.sum(axis=1, keepdims=True)
         for ci, k in enumerate(keys):
             if not k.startswith("_"):
                 out[k] = p[:, ci]
     for k in BINARY:
         pos, neg = P[k]
-        out[k] = 100.0 * (vecs @ _norm(pos) - vecs @ _norm(neg))
+        out[k] = scale * (vecs @ _norm(pos) - vecs @ _norm(neg))
     return out
 
 
@@ -450,16 +465,17 @@ def analyze_motion(src, duration):
 
 def pending(limit=10):
     return db.conn().execute(
-        "SELECT m.id, m.kind, m.path, m.duration, m.thumb, m.poster, a.crop FROM media m JOIN posts p ON p.id=m.post_id JOIN analysis a ON a.media_id=m.id "
+        "SELECT m.id, m.kind, m.path, m.duration, m.thumb, m.poster, a.crop, a.tech_version FROM media m JOIN posts p ON p.id=m.post_id JOIN analysis a ON a.media_id=m.id "
         "WHERE p.deleted_at IS NULL AND p.status='ready' AND COALESCE(a.scan_version,0) >= 1 "
         "AND COALESCE(a.tech_version,0) < ? ORDER BY COALESCE(p.saved_at, p.added_at) DESC LIMIT ?",
         (TECH_VERSION, limit)).fetchall()
 
 
 def frame_matrix(c, media_id):
-    rows = c.execute("SELECT t, vec FROM frames WHERE media_id=? ORDER BY t, id", (media_id,)).fetchall()
+    from . import ai
+    rows = c.execute("SELECT t, vec FROM frames WHERE media_id=? AND model=? ORDER BY t, id", (media_id, ai.active())).fetchall()
     if not rows:
-        return [], np.zeros((0, 512), np.float32)
+        return [], np.zeros((0, 8), np.float32)
     return [r[0] for r in rows], np.stack([np.frombuffer(r[1], np.float16).astype(np.float32) for r in rows])
 
 
@@ -487,7 +503,11 @@ def tag_media(r):
             except Exception:
                 traceback.print_exc()
     mot = {}
-    if r["kind"] == "video":
+    reuse = r["tech_version"] == -1 and r["kind"] == "video"   # only the AI model changed: keep the measured movement
+    if reuse:
+        mot = {row[0]: (row[1], row[2]) for row in c.execute("SELECT tag, score, t FROM techniques WHERE media_id=? AND source='motion'", (r["id"],))}
+        reuse = bool(mot)
+    if r["kind"] == "video" and not reuse:
         src = db.media_path(r["path"])
         if src.exists():
             try:
@@ -589,7 +609,7 @@ def relearn():
                 nsims[i:i + 50000] = (mat[i:i + 50000].astype(np.float32) @ N.T).max(axis=1)
         else:
             nsims = np.full(len(mat), -1, np.float32)
-        cut = max(0.86, float(np.percentile(sims, 99.0)))
+        cut = max(ai.th("proto"), float(np.percentile(sims, 99.0)))
         best = {}
         for j in np.nonzero((sims >= cut) & (sims > nsims + 0.02))[0]:
             mid = int(ix["media"][j])

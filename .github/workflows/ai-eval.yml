@@ -18,7 +18,7 @@ jobs:
       - run: pip install onnxruntime numpy pillow tokenizers requests
       - name: Compare models
         env:
-          N_IMAGES: "1000"
+          N_IMAGES: "800"
         run: python ci/ai_eval.py
       - uses: actions/upload-artifact@v4
         if: always()

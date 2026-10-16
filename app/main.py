@@ -724,6 +724,25 @@ async def ai_status(request):
     return JSONResponse(await run_in_threadpool(ai.status))
 
 
+async def ai_model(request):
+    """Switch the AI model: back to the previous one (instant, its scan is kept), or on to the new one."""
+    body = await request.json()
+    name = body.get("model")
+    if name not in ai.MODELS:
+        return err(400, "Unknown model")
+    if name == ai.TARGET:
+        prog = ai.upgrade_progress()
+        has_scan = db.conn().execute("SELECT 1 FROM frames WHERE model=? LIMIT 1", (name,)).fetchone()
+        if has_scan and (not prog or prog[0] >= prog[1]):
+            await run_in_threadpool(ai.switch_to, name)
+        else:      # carry on scanning with it, then it takes over
+            db.save_settings({"ai_model_pinned": False})
+            ai.ensure_current_model()
+    else:
+        await run_in_threadpool(ai.switch_to, name, True)
+    return JSONResponse(await run_in_threadpool(ai.status))
+
+
 async def ai_toggle(request):
     body = await request.json()
     if body.get("enabled"):
@@ -1076,6 +1095,7 @@ def create_app():
         Route("/api/ai", ai_status),
         Route("/api/update", update, methods=["GET", "POST"]),
         Route("/api/ai/toggle", ai_toggle, methods=["POST"]),
+        Route("/api/ai/model", ai_model, methods=["POST"]),
         Route("/api/desktop/save", save_to_downloads, methods=["POST"]),
         Route("/api/desktop/save-blob", save_blob, methods=["POST"]),
         Route("/api/desktop/reveal", reveal, methods=["POST"]),

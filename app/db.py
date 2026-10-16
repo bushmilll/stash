@@ -198,9 +198,14 @@ def init():
         acols = {r[1] for r in c.execute("PRAGMA table_info(analysis)")}
         for col, typ in (("content", "TEXT"), ("content_conf", "REAL"), ("clip", "BLOB"),
                          ("ai_version", "INTEGER"), ("content_user", "TEXT"), ("scan_version", "INTEGER"),
-                         ("tech_version", "INTEGER"), ("colors", "TEXT"), ("color_version", "INTEGER")):
+                         ("tech_version", "INTEGER"), ("colors", "TEXT"), ("color_version", "INTEGER"), ("scan_next", "TEXT")):
             if col not in acols:
                 c.execute(f"ALTER TABLE analysis ADD COLUMN {col} {typ}")
+        fcols = {r[1] for r in c.execute("PRAGMA table_info(frames)")}
+        if "model" not in fcols:   # which AI model made each frame's vector (everything before was CLIP)
+            c.execute("ALTER TABLE frames ADD COLUMN model TEXT")
+            c.execute("UPDATE frames SET model='clip-vit-b16'")
+        c.execute("CREATE INDEX IF NOT EXISTS frames_model ON frames(model, media_id)")
         c.commit()
 
 
@@ -339,7 +344,9 @@ DEFAULT_SETTINGS = {
     "media_dir": "",                     # where originals live; empty = inside the library folder
     "media_move_from": "",               # a move in progress (resumes if the app was closed)
     "media_move_to": "",
-    "quality_check": 0,                  # 1 = every video was re-checked for a sharper version once
+    "quality_check": 0,
+    "ai_model": "",                      # the AI model search and tags use (empty = decide from what's installed)
+    "ai_model_pinned": False,            # True = you chose the previous model: don't move to the newer one                  # 1 = every video was re-checked for a sharper version once
 }
 
 

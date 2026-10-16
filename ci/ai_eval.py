@@ -51,8 +51,6 @@ MODELS = {
                                    mean=[0.5] * 3, std=[0.5] * 3, pad=64, lower=True),
   "siglip2-b16 vis-fp32 txt-int8": dict(repo="onnx-community/siglip2-base-patch16-224-ONNX", vision="onnx/vision_model.onnx", text="onnx/text_model_int8.onnx",
                                    mean=[0.5] * 3, std=[0.5] * 3, pad=64, lower=True),
-  "siglip2-b16 vis-fp32 txt-fp32": dict(repo="onnx-community/siglip2-base-patch16-224-ONNX", vision="onnx/vision_model.onnx", text="onnx/text_model.onnx",
-                                   mean=[0.5] * 3, std=[0.5] * 3, pad=64, lower=True),
 }
 only = os.environ.get("MODELS")
 if only:
@@ -203,6 +201,9 @@ for name, cfg in MODELS.items():
     res["probe_top5"] = top
     report[name] = res
     print(json.dumps({name: res}, indent=1), flush=True)
+    core = {k: v for k, v in res.items() if k != "probe_top5"}
+    print(f"::notice title={name}::" + json.dumps(core, separators=(",", ":")), flush=True)
+    print(f"::warning title=probe {name}::" + json.dumps({q: [t for t, _ in v[:3]] for q, v in res["probe_top5"].items()}, separators=(",", ":"))[:3500], flush=True)
 
 # SigLIP's own scale/bias (turns similarities into probabilities): fit from the full model's logits
 try:
@@ -225,6 +226,7 @@ try:
     A = np.stack([C.ravel(), np.ones(C.size)], 1); sol = np.linalg.lstsq(A, L.ravel(), rcond=None)[0]
     report["siglip_scale_bias"] = [round(float(sol[0]), 3), round(float(sol[1]), 3)]
     print("siglip logit scale / bias:", report["siglip_scale_bias"], flush=True)
+    print(f"::notice title=siglip scale bias::{report['siglip_scale_bias']}", flush=True)
 except Exception as e:
     print("scale/bias fit failed:", e, flush=True)
 

@@ -49,16 +49,24 @@ def record(q, post_id, signal, idx=0, t=0.0):
 def _qvec(q):
     from . import ai
     with _lock:
-        if q not in _qcache:
+        if q not in _qcache or _qcache.get("_model") != ai.active():
+            if _qcache.get("_model") != ai.active():
+                _qcache.clear(); _qcache["_model"] = ai.active()
             _qcache[q] = ai.embed_text(q)
             if len(_qcache) > 400:
-                _qcache.pop(next(iter(_qcache)))
+                _qcache.pop(next(k for k in _qcache if k != "_model"))
         return _qcache[q]
 
 
+def model_changed():
+    _qcache.clear()
+    _state["version"] += 1
+
+
 def _frame_vec(c, post_id, idx, t):
-    r = c.execute("SELECT f.vec FROM frames f JOIN media m ON m.id=f.media_id WHERE m.post_id=? AND m.idx=? "
-                  "ORDER BY ABS(f.t - ?) LIMIT 1", (post_id, idx, t)).fetchone()
+    from . import ai
+    r = c.execute("SELECT f.vec FROM frames f JOIN media m ON m.id=f.media_id WHERE m.post_id=? AND m.idx=? AND f.model=? "
+                  "ORDER BY ABS(f.t - ?) LIMIT 1", (post_id, idx, ai.active(), t)).fetchone()
     return np.frombuffer(r[0], np.float16).astype(np.float32) if r else None
 
 
@@ -74,9 +82,11 @@ def related(q):
         if other == q:
             weights[other] = 1.0
         else:
+            from . import ai
+            same = ai.th("q_same")
             sim = float(me @ _qvec(other))
-            if sim >= 0.9:
-                weights[other] = 0.5 * (sim - 0.9) / 0.1 + 0.25
+            if sim >= same:
+                weights[other] = 0.5 * min(1.0, (sim - same) / (1 - same)) + 0.25
     if not weights:
         return {}, set()
     out, hidden = {}, set()
@@ -96,7 +106,8 @@ def collection_examples(q, limit=40):
     c = db.conn()
     names = [r[0] for r in c.execute("SELECT name FROM collections")]
     me = _qvec(q)
-    hits = [n for n in names if norm_q(n) == q or (len(q) > 3 and q in norm_q(n)) or float(me @ _qvec(norm_q(n))) >= 0.93]
+    from . import ai
+    hits = [n for n in names if norm_q(n) == q or (len(q) > 3 and q in norm_q(n)) or float(me @ _qvec(norm_q(n))) >= ai.th("coll")]
     if not hits:
         return []
     marks = ",".join("?" * len(hits))

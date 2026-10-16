@@ -149,7 +149,10 @@ def run(port):
             fd.rectangle([0, 470, 1280, 720], fill=(8, 8, 12)); fd.ellipse([610, 300, 670, 360], fill=(8, 8, 12)); fd.rectangle([600, 350, 680, 600], fill=(8, 8, 12))
             fim.save(tmp / "film.jpg")
             v1, v2 = ai.embed_image(tmp / "card.jpg"), ai.embed_image(tmp / "film.jpg")
-            check("AI image embedding", v1.shape == (512,) and abs(float(np.linalg.norm(v1)) - 1) < 1e-3, str(v1.shape))
+            check("AI model in use", ai.active() == ai.TARGET, ai.active())
+            check("AI image embedding", v1.ndim == 1 and v1.shape[0] >= 256 and abs(float(np.linalg.norm(v1)) - 1) < 1e-3, str(v1.shape))
+            tv = ai.embed_text("a photo of a red car")
+            check("AI text embedding matches image size", tv.shape == v1.shape, f"{tv.shape} vs {v1.shape}")
             l1, s1 = ai.classify(v1, "")
             l2, s2 = ai.classify(v2, "")
             check("AI: text graphic is not a film frame", l1 != "film", f"{l1} {s1}")
@@ -174,6 +177,13 @@ def run(port):
             for tt, im in frames:
                 for sq in ai._square_crops(im):
                     tensors.append(ai._to_tensor(sq)); times.append(tt)
+            # real photos: a red and a blue square read as red / blue (checks colors and words line up for this model)
+            red = Image.new("RGB", (400, 400), (200, 25, 30)); blue = Image.new("RGB", (400, 400), (30, 60, 210))
+            red.save(tmp / "red.png"); blue.save(tmp / "blue.png")
+            vr, vb = ai.embed_image(tmp / "red.png"), ai.embed_image(tmp / "blue.png")
+            qr, qb = ai.embed_query("red"), ai.embed_query("blue")
+            check("AI: words and pictures line up (red vs blue)", float(vr @ qr) > float(vb @ qr) and float(vb @ qb) > float(vr @ qb),
+                  f"red img: red {float(vr @ qr):.3f} blue {float(vr @ qb):.3f}; blue img: red {float(vb @ qr):.3f} blue {float(vb @ qb):.3f}")
             vecs = ai.embed_batch(tensors)
             q = ai.embed_query("flower")
             sims = vecs @ q
