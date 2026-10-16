@@ -725,13 +725,15 @@ function tile(p, i, ratio) {
   });
   box.append(h("span", { class: "selbox", role: "checkbox", "aria-label": "Select", title: "Select (or ⌘-click the tile)",
     onclick: (e) => { e.stopPropagation(); e.preventDefault(); toggleSelect(p.id, el, e.shiftKey ? i : null); } }));
-  const star = h("span", { class: "favstar", role: "button", title: "Favorite", "aria-label": "Favorite",
+  const star = h("span", { class: "favstar", role: "button", title: "Favorite (F)", "aria-label": "Favorite",
     onclick: (e) => { e.stopPropagation(); e.preventDefault(); const it = S.items.find((x) => x.id === p.id) || p; setFavorite([p.id], !it.favorite); } });
   star.innerHTML = '<svg viewBox="0 0 24 24"><path d="M12 2.8l2.75 5.9 6.45.75-4.78 4.4 1.3 6.37L12 17.02l-5.72 3.2 1.3-6.37L2.8 9.45l6.45-.75z"/></svg>';
   box.append(star);
   if (searchActive() && S.aiOn) {
     box.append(h("span", { class: "nomatch", role: "button", title: "Not what I searched for: hide it and teach search", onclick: (e) => { e.stopPropagation(); notAMatch(p); } }, "Not a match"));
   }
+  el.addEventListener("mouseenter", () => { S.hoverId = p.id; });
+  el.addEventListener("mouseleave", () => { if (S.hoverId === p.id) S.hoverId = null; });
   el.addEventListener("dragstart", (e) => e.dataTransfer.setData("text/stash-id", p.id));
   if (isVideo) {
     let v, timer;
@@ -884,7 +886,7 @@ function renderSelbar() {
     }
   };
   const allFav = ids().every((id) => S.items.find((x) => x.id === id)?.favorite);
-  const star = h("button", { class: "selstar" + (allFav ? " on" : ""), title: allFav ? "Remove from Favorites" : "Add to Favorites", "aria-label": "Favorite",
+  const star = h("button", { class: "selstar" + (allFav ? " on" : ""), title: (allFav ? "Remove from Favorites" : "Add to Favorites") + " (F)", "aria-label": "Favorite",
     onclick: async () => { await setFavorite(ids(), !allFav); toast(allFav ? `Removed ${n} from <b>Favorites</b>` : `Added ${n} to <b>Favorites</b>`); renderSelbar(); } }, "★");
   fill(bar, count, star, input, h("button", { onclick: add }, "Add"),
     S.filter.collection ? h("button", { class: "ghost", onclick: async () => {
@@ -1583,6 +1585,17 @@ document.addEventListener("keydown", (e) => {
   }
   if (typing) { if (e.key === "Escape") document.activeElement.blur(); return; }
   if (e.key === "/") { e.preventDefault(); $("#q").focus(); }
+  else if (e.key.toLowerCase() === "f" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    // F: favorite what's selected, or the tile under the mouse
+    const ids = S.selected.size ? [...S.selected] : S.hoverId ? [S.hoverId] : [];
+    if (!ids.length) return;
+    e.preventDefault();
+    const on = !ids.every((id) => S.items.find((x) => x.id === id)?.favorite);
+    setFavorite(ids, on).then(() => {
+      if (S.selected.size) renderSelbar();
+      toast(on ? `Added ${ids.length > 1 ? ids.length + " " : ""}to <b>Favorites</b>` : `Removed ${ids.length > 1 ? ids.length + " " : ""}from <b>Favorites</b>`);
+    });
+  }
   else if (e.key === "Escape") { if (!$("#drawer").hidden) closeDrawer(); else clearSelection(); }
   else if ((e.key === "Delete" || e.key === "Backspace") && S.selected.size && $("#drawer").hidden) { e.preventDefault(); trashSelected(); }
 });

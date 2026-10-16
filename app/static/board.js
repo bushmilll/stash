@@ -156,9 +156,9 @@ const Board = (() => {
     for (let r = R; r >= 1; r--) { const j = cut[r][i]; rows.unshift([j, i]); i = j; }
     return rows;
   }
-  function layoutRows(ms, y0, v) {
+  function layoutRows(ms, y0, v, o = {}) {
     const n = ms.length, g = B.gap, avail = W - 2 * MARGIN();
-    const R = Math.max(1, Math.min(n, st.rows || autoRows(n)));
+    const R = Math.max(1, Math.min(n, o.R || st.rows || autoRows(n)));
     let y = y0;
     for (const [a, b] of partition(ms.map((it) => 1 / ratio(it)), R)) {
       const row = ms.slice(a, b); if (!row.length) continue;
@@ -268,9 +268,9 @@ const Board = (() => {
     return v;
   }
   // lay a group of posts out on its own, from y = 0: -> { media, texts, h }
-  function sandbox(chunk, numBase, key) {
+  function sandbox(chunk, numBase, key, R) {
     const t = { media: new Map(), texts: [] };
-    let end = chunk.length ? LAYOUTS[st.layout](chunk, 0, t, { numBase, nCols: media().length }) : 0;
+    let end = chunk.length ? LAYOUTS[st.layout](chunk, 0, t, { numBase, nCols: media().length, R }) : 0;
     if (st.layout === "sheet" && st.captions !== "off" && chunk.length) {
       const before = t.texts.length;
       end = captionsFor(chunk, end + 40, t, numBase, key);
@@ -278,12 +278,44 @@ const Board = (() => {
     }
     return { ...t, h: end };
   }
+  // stretch a slide's rows (or columns) taller so the posts reach the top and bottom margins; gaps stay the same
+  function fillDown(sb, avail) {
+    if (st.layout !== "rows" && st.layout !== "masonry") return;
+    const g = B.gap, MAX = 1.6;
+    const groups = new Map();
+    for (const [it, p] of sb.media) {
+      const k = st.layout === "rows" ? Math.round(p.y) : Math.round(p.x);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push([it, p]);
+    }
+    if (st.layout === "rows") {
+      const rows = [...groups.keys()].sort((a, b) => a - b);
+      const content = rows.reduce((a, k) => a + groups.get(k)[0][1].h, 0), G = (rows.length - 1) * g;
+      const f = Math.min(MAX, (avail - G) / content);
+      if (!(f > 1)) return;
+      let y = 0;
+      for (const k of rows) { const hh = groups.get(k)[0][1].h * f; for (const [it, p] of groups.get(k)) sb.media.set(it, { ...p, y, h: hh }); y += hh + g; }
+      sb.h = y - g;
+    } else {
+      let end = 0;
+      for (const list of groups.values()) {
+        list.sort((a, b) => a[1].y - b[1].y);
+        const content = list.reduce((a, [, p]) => a + p.h, 0), G = (list.length - 1) * g;
+        const f = Math.min(MAX, (avail - G) / content);
+        if (!(f > 1)) { end = Math.max(end, list[list.length - 1][1].y + list[list.length - 1][1].h); continue; }
+        let y = 0;
+        for (const [it, p] of list) { const hh = p.h * f; sb.media.set(it, { ...p, y, h: hh }); y += hh + g; }
+        end = Math.max(end, y - g);
+      }
+      sb.h = end;
+    }
+  }
   function computePaged(v, ms, title, titleH, top) {
     const PH = Math.round(W * SIZES[st.size]);
     const bottomTitle = st.show_title && !top;
     const area = (first, last) => PH - 2 * MARGIN() - (first && top ? titleH + 32 + Math.max(0, TITLE_IN() - MARGIN()) : 0) - (last && bottomTitle ? titleH + 32 + Math.max(0, TITLE_IN() - MARGIN()) : 0);
     // which posts go on which slide
-    const chunks = [];
+    const chunks = [], rowsFor = {};
     if (st.pages === "fit" || st.layout === "collage" || !ms.length) chunks.push(ms);
     else {
       let s0 = 0;
@@ -292,10 +324,16 @@ const Board = (() => {
         const left = ms.length - s0;
         let k = 1;
         if (st.layout === "rows") {
-          // rows: fewest posts that still fit the slide's height in the chosen number of rows
-          const R = st.rows || 3;
-          k = Math.min(left, R);
-          while (k < left && sandbox(ms.slice(s0, s0 + k), s0, "p" + chunks.length).h > avail) k++;
+          // rows: fewest posts that still fit the slide's height in the chosen number of rows (that's the
+          // biggest rows that fit); with rows on Auto, try 1-4 rows and keep whichever fills the slide best
+          let best = null;
+          for (const R of st.rows ? [st.rows] : [1, 2, 3, 4]) {
+            let kk = Math.min(left, R), hh;
+            while ((hh = sandbox(ms.slice(s0, s0 + kk), s0, "p" + chunks.length, R).h) > avail && kk < left) kk++;
+            if (hh > avail && best) continue;
+            if (!best || (hh <= avail && hh > best.h) || (best.h > avail && hh < best.h)) best = { k: kk, h: hh, R };
+          }
+          k = best.k; rowsFor[chunks.length] = best.R;
         } else {
           // sheet / columns: as many posts as fit
           while (k < left && sandbox(ms.slice(s0, s0 + k + 1), s0, "p" + chunks.length).h <= avail) k++;
@@ -315,7 +353,8 @@ const Board = (() => {
       let y = pageTop + MARGIN();
       if (first && top) { v.texts.push(title(pageTop + TITLE_IN())); y = pageTop + TITLE_IN() + titleH + 32; }
       const avail = area(first, last);
-      const sb = sandbox(chunk, base, "p" + pi);
+      const sb = sandbox(chunk, base, "p" + pi, rowsFor[pi]);
+      if (sb.h < avail) fillDown(sb, avail);          // rows and columns stretch to the slide's height (images crop a little)
       const sc = sb.h > avail ? avail / sb.h : 1;     // shrink to fit when needed, centred across
       const dx = (W - 2 * MARGIN()) * (1 - sc) / 2;
       const dy = st.layout === "sheet" || sc < 1 ? 0 : (avail - sb.h) / 2;
