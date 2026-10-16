@@ -1136,7 +1136,8 @@ def create_app():
     inner = Starlette(routes=routes, exception_handlers={Exception: server_error})
 
     async def app_(scope, receive, send):   # notice when you're using the app, so background work steps aside
-        if scope.get("type") == "http" and scope.get("path", "").startswith(("/api/", "/files/")):
+        if scope.get("type") == "http" and scope.get("path", "").startswith(("/api/", "/files/")) \
+                and not any(k == b"x-stash-auto" for k, _ in scope.get("headers", [])):
             activity.touch(scope["path"])
         await inner(scope, receive, send)
     return app_

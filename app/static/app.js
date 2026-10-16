@@ -12,13 +12,17 @@ const h = (tag, attrs = {}, ...kids) => {
   return el;
 };
 const fill = (el, ...kids) => el.replaceChildren(...kids.flat().filter((k) => k != null && k !== false));
+// requests the app makes on its own (status refreshes) are marked, so they don't count as you using the app
+let AUTO = false;
+const asAuto = (fn) => { AUTO = true; try { return fn(); } finally { AUTO = false; } };
 const api = async (url, opts = {}) => {
   const isForm = opts.body instanceof FormData || opts.body instanceof Blob;
+  const headers = { ...(opts.headers || {}), ...(opts.body && !isForm ? { "Content-Type": "application/json" } : {}), ...(AUTO ? { "X-Stash-Auto": "1" } : {}) };
   let res;
   try {
     res = await fetch(url, {
       ...opts,
-      headers: opts.body && !isForm ? { "Content-Type": "application/json" } : opts.headers,
+      headers,
       body: opts.body && !isForm ? JSON.stringify(opts.body) : opts.body,
     });
   } catch {
@@ -1510,7 +1514,7 @@ function renderDrawer(focus) {
       a.enabled && (a.installed || a.downloading)
         ? h("button", { onclick: async () => { await api("/api/ai/toggle", { method: "POST", body: { enabled: false } }); loadAI(); } }, "Turn off")
         : h("button", { class: "primary", onclick: async () => { await api("/api/ai/toggle", { method: "POST", body: { enabled: true } }); toast("Downloading the AI model"); loadAI(); } }, "Turn on AI search"));
-    if (!$("#drawer").hidden && (a.downloading || a.upgrade || (a.enabled && a.installed && a.tagged < a.total))) aiTimer = setTimeout(loadAI, 3000);
+    if (!$("#drawer").hidden && (a.downloading || a.upgrade || (a.enabled && a.installed && a.tagged < a.total))) aiTimer = setTimeout(() => asAuto(loadAI), 3000);
   }).catch(() => fill(aiBody));
   loadAI();
 
@@ -1574,7 +1578,7 @@ async function pollJobs(now) {
     S.jobs = await api("/api/jobs");
     renderJobs();
     const running = S.jobs.some((j) => j.status === "running" || j.status === "queued");
-    if (running || wasRunning) loadSidebar();
+    if (running || wasRunning) asAuto(loadSidebar);
     if (wasRunning && !running) { reload(); const last = S.jobs[0]; if (last) toast(esc(last.message), { error: last.status === "error" }); }
     wasRunning = running;
     pollTimer = setTimeout(pollJobs, running || !$("#drawer").hidden ? 2500 : 20000);

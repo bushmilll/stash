@@ -149,6 +149,19 @@ def _worker():
                 awake.terminate()
 
 
+NET_BLIPS = ("resolve", "nodename", "name or service", "connection", "timed out", "timeout", "network is unreachable",
+             "temporarily unavailable", "max retries", "couldn't reach instagram")
+
+
+def _backoff(job):
+    """How long to wait after a failed run: Instagram pushing back = 2 hours; the Mac briefly offline = 5 minutes."""
+    msg = (job[2] if len(job) > 2 else "") or ""
+    low = msg.lower()
+    if any(k in low for k in NET_BLIPS) and not _blocking(msg):
+        return 5 * 60
+    return 2 * 3600
+
+
 def _scheduler():
     first = True
     while True:
@@ -166,14 +179,14 @@ def _scheduler():
             s = db.load_settings()
             if s.get("collections") or s.get("instagram_username"):
                 busy = db.conn().execute("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0]
-                lu = db.conn().execute("SELECT COALESCE(finished, started), status FROM jobs WHERE kind='upgrade' ORDER BY id DESC LIMIT 1").fetchone()
+                lu = db.conn().execute("SELECT COALESCE(finished, started), status, message FROM jobs WHERE kind='upgrade' ORDER BY id DESC LIMIT 1").fetchone()
                 # straight on to the next round while there's work; back off two hours after a failed run
-                up_ok = not lu or time.time() - (lu[0] or 0) > (2 * 3600 if lu[1] == "error" else 30)
+                up_ok = not lu or time.time() - (lu[0] or 0) > (_backoff(lu) if lu[1] == "error" else 30)
                 todo = db.conn().execute(
                     "SELECT COUNT(*) FROM media m JOIN posts p ON p.id=m.post_id WHERE m.kind='video' AND COALESCE(m.hq,0)=0 "
                     "AND p.status='ready' AND p.deleted_at IS NULL").fetchone()[0]
-                ls = db.conn().execute("SELECT COALESCE(finished, started), status FROM jobs WHERE kind='sync' ORDER BY id DESC LIMIT 1").fetchone()
-                sync_ok = not ls or time.time() - (ls[0] or 0) > (2 * 3600 if ls[1] == "error" else 30)
+                ls = db.conn().execute("SELECT COALESCE(finished, started), status, message FROM jobs WHERE kind='sync' ORDER BY id DESC LIMIT 1").fetchone()
+                sync_ok = not ls or time.time() - (ls[0] or 0) > (_backoff(ls) if ls[1] == "error" else 30)
                 want_sync = sync_ok and bool(feeds_incomplete())
                 want_up = up_ok and bool(todo)
                 if not busy and (want_sync or want_up):
