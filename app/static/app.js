@@ -1255,7 +1255,7 @@ function renderDrawer(focus) {
       null,
       h("button", { class: "danger", onclick: () => api("/api/jobs", { method: "POST", body: { action: "cancel" } }).then(() => toast("Stopping after the current post")) }, "Stop")),
     c.lowq ? h("p", { class: "hint", style: "margin-top:10px" },
-      `${c.lowq.toLocaleString()} video posts are lined up to be re-checked for a sharper copy. Stash does this on its own in the background, taking turns with syncing. Nothing to click.`) : null,
+      `${c.lowq.toLocaleString()} video posts are lined up to be re-checked for a sharper copy. Stash does these first, on its own in the background, then carries on catching up on older saves. Nothing to click.`) : null,
     h("div", { class: "jobs", id: "jobList", style: "margin-top:14px" }));
   const verLine = h("div", { class: "stat-line", style: "margin-top:14px" }, "Stash " + (UPD?.current || ""));
   const verBtn = h("button", { onclick: async () => {
@@ -1270,7 +1270,7 @@ function renderDrawer(focus) {
   statusSec.append(verLine, h("div", { class: "row" }, verBtn));
   if (!UPD) checkUpdate().then((u) => { if (u) verLine.textContent = "Stash " + u.current; });
   for (const f of s._catching_up || []) statusSec.append(h("p", { class: "hint" },
-    `${f.name}: catching up on older saves. ${f.seen ? f.seen.toLocaleString() + " read so far. " : ""}It keeps going in the background from where it left off, even after Stash is closed and reopened.`));
+    `${f.name}: catching up on older saves. ${f.seen ? f.seen.toLocaleString() + " read so far. " : ""}It keeps going in the background from where it left off, even after Stash is closed and reopened, and keeps your Mac from dozing off while it works (plugged in, it'll run overnight with the screen off).`));
   if (s._signed_in === false) statusSec.append(h("p", { style: "color:var(--danger)" },
     "Instagram isn't seeing you as signed in, so it's handing out smaller, softer videos. Open instagram.com in the browser chosen below, make sure you're logged in, and if your Mac asks about “Chrome Safe Storage”, choose Always Allow."));
   if (!s._gallery_dl) statusSec.append(h("p", { style: "color:var(--danger)" }, "The sync engine is missing from this copy of Stash. Download the latest version and replace the app."));

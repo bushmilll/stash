@@ -1,16 +1,22 @@
 """Logged-in sync with Instagram via gallery-dl, plus a small background job runner.
 
 Design notes (keeping your account safe):
-  * One job at a time, never in parallel.
+  * One job at a time, and Instagram's API is only ever asked one thing at a time.
   * gallery-dl waits a random 6-12s between Instagram API requests (configurable).
+  * The media files themselves (from Instagram's file servers, not its API) download a few at once,
+    the way a browser loads a page of videos, while the next request waits its turn.
   * Feeds are newest-first, so a routine sync stops after N already-downloaded posts in a row
     instead of paging through all 10k+ saves every time.
   * If Instagram pushes back (login challenge, rate limit), the job stops instead of retrying.
 """
+import os
 import queue
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import random
 import shutil
+import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -36,6 +42,54 @@ class StopSync(Exception):
 
 class Cancelled(Exception):
     pass
+
+
+DL_WORKERS = 3   # media files downloading at once (file servers only; API requests stay one at a time)
+
+
+class _Downloads:
+    """Runs _save_post calls a few at a time; the caller keeps reading the feed meanwhile."""
+    def __init__(self, on_done):
+        self.ex = ThreadPoolExecutor(DL_WORKERS, thread_name_prefix="stash-dl")
+        self.pending = []
+        self.on_done = on_done   # on_done(tag, exception_or_None)
+
+    def submit(self, tag, fn, *a, **k):
+        while len(self.pending) >= DL_WORKERS * 2:   # don't run far ahead of the downloads
+            self.reap(block=True)
+        self.pending.append((tag, self.ex.submit(fn, *a, **k)))
+
+    def reap(self, block=False):
+        if block and self.pending:
+            self.pending[0][1].exception()   # wait for the oldest
+        still = []
+        for tag, f in self.pending:
+            if f.done():
+                self.on_done(tag, f.exception())
+            else:
+                still.append((tag, f))
+        self.pending = still
+
+    def finish(self):
+        try:
+            while self.pending:
+                self.reap(block=True)
+        finally:
+            self.ex.shutdown(wait=True)
+
+    def abort(self):
+        self.ex.shutdown(wait=True, cancel_futures=True)
+
+
+def _keep_awake():
+    """Stop the Mac from idle-sleeping while a job runs (closing the lid still sleeps it)."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        return subprocess.Popen(["caffeinate", "-i", "-s", "-w", str(os.getpid())],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        return None
 
 
 # ---------- job runner ----------
@@ -76,6 +130,7 @@ def _worker():
         jid, kind = _queue.get()
         _current.update(id=jid, cancel=False)
         _update(jid, status="running", message="Starting…")
+        awake = _keep_awake()
         try:
             fn = {"sync": run_sync, "backfill": run_backfill, "upgrade": run_upgrade,
                   "move": lambda j: storage.run_move(j, _update, _check_cancel)}[kind]
@@ -90,13 +145,15 @@ def _worker():
             _update(jid, status="error", message=f"{type(e).__name__}: {e}"[:400], finished=db.now())
         finally:
             _current.update(id=None, cancel=False)
+            if awake:
+                awake.terminate()
 
 
 def _scheduler():
     first = True
     while True:
         if not first:
-            time.sleep(60)
+            time.sleep(15)
         first = False
         try:
             backups = db.list_backups()
@@ -110,21 +167,18 @@ def _scheduler():
             if s.get("collections") or s.get("instagram_username"):
                 busy = db.conn().execute("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0]
                 lu = db.conn().execute("SELECT COALESCE(finished, started), status FROM jobs WHERE kind='upgrade' ORDER BY id DESC LIMIT 1").fetchone()
-                last_up = (lu[0] or 0) + (2 * 3600 if lu and lu[1] == "error" else 0) if lu else 0   # back off after a failed run
+                # straight on to the next round while there's work; back off two hours after a failed run
+                up_ok = not lu or time.time() - (lu[0] or 0) > (2 * 3600 if lu[1] == "error" else 30)
                 todo = db.conn().execute(
                     "SELECT COUNT(*) FROM media m JOIN posts p ON p.id=m.post_id WHERE m.kind='video' AND COALESCE(m.hq,0)=0 "
                     "AND p.status='ready' AND p.deleted_at IS NULL").fetchone()[0]
                 ls = db.conn().execute("SELECT COALESCE(finished, started), status FROM jobs WHERE kind='sync' ORDER BY id DESC LIMIT 1").fetchone()
-                last_sync = ((ls[0] or 0) + (2 * 3600 if ls[1] == "error" else 0)) if ls else 0
-                last_kind = (db.conn().execute("SELECT kind FROM jobs WHERE kind IN ('sync','upgrade') ORDER BY id DESC LIMIT 1").fetchone() or [None])[0]
-                want_sync = bool(feeds_incomplete()) and time.time() - last_sync > 5 * 60
-                want_up = bool(todo) and time.time() - last_up > 5 * 60
+                sync_ok = not ls or time.time() - (ls[0] or 0) > (2 * 3600 if ls[1] == "error" else 30)
+                want_sync = sync_ok and bool(feeds_incomplete())
+                want_up = up_ok and bool(todo)
                 if not busy and (want_sync or want_up):
-                    # take turns: a stretch of catching up on older saves, then a batch of quality upgrades
-                    if want_sync and (not want_up or last_kind != "sync"):
-                        enqueue("sync")
-                    else:
-                        enqueue("upgrade")
+                    # quality upgrades first (there are far fewer of them), then catching up on older saves
+                    enqueue("upgrade" if want_up else "sync")
             hours = float(s.get("auto_sync_hours") or 0)
             if hours <= 0 or not (s.get("collections") or s.get("instagram_username")):
                 continue
@@ -503,8 +557,36 @@ def run_sync(jid):
     rerank = int(s.get("rank_version") or 0) < 1     # one-time full pass to fix order from older versions
     run_start = db.now()
     ranked = set()
-    paused = False
-    new_total, linked, failed_posts = 0, 0, 0
+    counts = {"new": 0, "failed": 0}
+    stop = {}
+
+    def done(tag, e):
+        code, uname = tag
+        if e is None:
+            counts["new"] += 1
+            return
+        if isinstance(e, (Cancelled, StopSync)):
+            stop.setdefault("e", e)
+            return
+        msg = _friendly(e)
+        if _blocking(msg):
+            stop.setdefault("e", StopSync(msg))
+            return
+        # one bad post shouldn't stop the whole run: park it for the backlog fetcher
+        counts["failed"] += 1
+        with db.tx() as c:
+            db.upsert_post(c, code, username=uname, status="failed", error=msg[:300])
+
+    pool = _Downloads(done)
+    try:
+        return _run_sync(jid, s, feeds, stop_after, rerank, run_start, ranked, pool, counts, stop)
+    except BaseException:
+        pool.abort()
+        raise
+
+
+def _run_sync(jid, s, feeds, stop_after, rerank, run_start, ranked, pool, counts, stop):
+    paused, linked = False, 0
     for fi, (url, name) in enumerate(feeds):
         label = name or ("All saved" if "all-posts" in url else url)
         st = _feed_state(url)
@@ -543,19 +625,15 @@ def run_sync(jid):
                             break
                     else:
                         known_streak = 0
-                        try:
-                            _save_post(post, files, col, saved_at=stamp)
-                            new_total += 1
-                        except (Cancelled, StopSync):
-                            raise
-                        except Exception as e:
-                            # one bad post shouldn't stop the whole run: park it for the backlog fetcher
-                            msg = _friendly(e)
-                            if _blocking(msg):
-                                raise StopSync(f"{label}: {msg}")
-                            failed_posts += 1
+                        if code:   # note it first, so a post still downloading when the app closes gets fetched later
                             with db.tx() as c:
-                                db.upsert_post(c, code, username=post.get("username") or "", status="failed", error=msg[:300])
+                                ppid = db.upsert_post(c, code, username=post.get("username") or "", saved_at=stamp, saved_src="feed", status="pending")
+                                if col:
+                                    db.add_to_collection(c, ppid, col, source="instagram")
+                        pool.submit((code, post.get("username") or ""), _save_post, post, files, col, saved_at=stamp)
+                    pool.reap()
+                    if "e" in stop:
+                        raise stop["e"]
                     if mode == "deep" and time.time() - deep_started > DEEP_STRETCH and _has_upgrades():
                         # take turns with the quality upgrades: bookmark and let them run, then carry on
                         _save_feed(url, cursor=getattr(holder.get("ex"), "_cursor", None) or st["cursor"], seen=st["seen"] + seen)
@@ -566,7 +644,7 @@ def run_sync(jid):
                         last_save = time.time()
                     where = "catching up on older saves" if mode == "deep" else "checking for new saves"
                     _update(jid, done=fi, total=len(feeds),
-                            message=f"{label}: {where}, {st['seen'] + seen if mode == 'deep' else seen} checked, {new_total} new so far")
+                            message=f"{label}: {where}, {st['seen'] + seen if mode == 'deep' else seen} checked, {counts['new']} new so far")
                 else:
                     # reached the very end of the feed: from now on, syncs only need the top
                     if mode == "deep" or not st["complete"]:
@@ -582,6 +660,10 @@ def run_sync(jid):
                 raise StopSync(f"{label}: {_friendly(e)}")
             if st["complete"]:
                 break
+    pool.finish()
+    if "e" in stop:
+        raise stop["e"]
+    new_total, failed_posts = counts["new"], counts["failed"]
     if rerank:
         db.save_settings({"rank_version": 1})
     msg = f"Synced {len(feeds)} feed(s): {new_total} new post(s)"
@@ -621,13 +703,37 @@ def run_upgrade(jid):
         return "All videos are already in the best quality Instagram offers"
     delay = s.get("request_delay") or [6, 12]
     ok = failed = misses = 0
+    res = {"ok": 0, "failed": 0}
+
+    def done(tag, e):
+        if e is None:
+            res["ok"] += 1
+        elif not isinstance(e, (Cancelled, StopSync)):
+            res["failed"] += 1
+            print(f"[stash] upgrade download failed for {tag}: {e}", flush=True)
+    pool = _Downloads(done)
+    try:
+        ok, failed = _upgrade_loop(jid, rows, delay, pool, res)
+    except BaseException:
+        pool.abort()
+        raise
+    pool.finish()
+    ok, failed = res["ok"], failed + res["failed"]
+    left = db.conn().execute(
+        "SELECT COUNT(DISTINCT m.post_id) FROM media m JOIN posts p ON p.id=m.post_id "
+        "WHERE m.kind='video' AND COALESCE(m.hq,0)=0 AND p.status='ready' AND p.deleted_at IS NULL").fetchone()[0]
+    return f"Upgraded {ok} video post(s) to best quality" + (f", {failed} unavailable" if failed else "") + (f" · {left} to go" if left else "")
+
+
+def _upgrade_loop(jid, rows, delay, pool, res):
+    ok = failed = misses = 0
     for i, r in enumerate(rows):
         _check_cancel()
+        pool.reap()
         _update(jid, done=i, total=len(rows), message=f"Upgrading video {i + 1} of {len(rows)}")
         try:
             for post, files in _iter_posts(f"https://www.instagram.com/p/{r['shortcode']}/"):
-                _save_post(post, files, upgrade=True)
-            ok += 1
+                pool.submit(r["shortcode"], _save_post, post, files, upgrade=True)
             misses = 0
         except (Cancelled, StopSync):
             raise
@@ -648,10 +754,7 @@ def run_upgrade(jid):
         for _ in range(int(random.uniform(float(delay[0]), float(delay[1])) * 2)):
             _check_cancel()
             time.sleep(0.5)
-    left = db.conn().execute(
-        "SELECT COUNT(DISTINCT m.post_id) FROM media m JOIN posts p ON p.id=m.post_id "
-        "WHERE m.kind='video' AND COALESCE(m.hq,0)=0 AND p.status='ready' AND p.deleted_at IS NULL").fetchone()[0]
-    return f"Upgraded {ok} video post(s) to best quality" + (f", {failed} unavailable" if failed else "") + (f" · {left} to go" if left else "")
+    return ok, failed
 
 
 def run_backfill(jid):
