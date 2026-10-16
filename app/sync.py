@@ -411,7 +411,17 @@ def _save_post(post, files, collection=None, upgrade=False, saved_at=None):
                 continue
             target = dest.with_name(dest.stem + ".new.mp4") if dest.exists() else dest
             try:
-                _download_dash(f["_ytdl_manifest_data"], target, headers)
+                # get the best version now, so it never needs a second pass later: a hiccup gets two more tries
+                for attempt in range(3):
+                    try:
+                        _download_dash(f["_ytdl_manifest_data"], target, headers)
+                        break
+                    except (Cancelled, StopSync):
+                        raise
+                    except Exception:
+                        if attempt == 2:
+                            raise
+                        time.sleep(3 * (attempt + 1))
                 best.add(i)
             except (Cancelled, StopSync):
                 raise
