@@ -58,7 +58,8 @@ const Board = (() => {
     B.items.forEach((it, i) => { if (it.z == null) it.z = i + 1; });
     selected = null; undo = []; heights = {}; els = new Map();
     fill($("#paper"));
-    $("#board").hidden = false; document.body.style.overflow = "hidden";
+    if ($("#board").hidden) lockPage(true);
+    $("#board").hidden = false;
     $("#boardTitle").value = B.name;
     $("#boardGap").value = B.gap;
     drawSwatches();
@@ -72,7 +73,8 @@ const Board = (() => {
   async function close(quiet) {
     if (!B) return;
     await flush();
-    $("#board").hidden = true; document.body.style.overflow = "";
+    if (!$("#board").hidden) lockPage(false);
+    $("#board").hidden = true;
     B = null; selected = null; els = new Map(); fill($("#paper")); clipPanel();
     loadSidebar();
     if (!quiet) window.navClosed?.();
@@ -989,7 +991,7 @@ const Board = (() => {
     $("#boardDelete").onclick = () => modal({
       title: `Delete “${B.name}”?`, text: "The moodboard is removed. The posts in it stay in your library.",
       actions: [{ label: "Cancel", fn: (c) => c() }, { label: "Delete moodboard", danger: true, fn: async (c) => {
-        await api(`/api/boards/${B.id}`, { method: "DELETE" }); c(); B = null; els = new Map(); fill($("#paper")); clipPanel(); $("#board").hidden = true; document.body.style.overflow = ""; loadSidebar();
+        await api(`/api/boards/${B.id}`, { method: "DELETE" }); c(); B = null; els = new Map(); fill($("#paper")); clipPanel(); if (!$("#board").hidden) lockPage(false); $("#board").hidden = true; loadSidebar();
       } }],
     });
     window.addEventListener("resize", () => { if (B) render(); });
