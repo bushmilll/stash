@@ -176,6 +176,9 @@ def _backfill_posters(batch=20):
             c.execute("UPDATE media SET poster=? WHERE id=?", (poster or "", r["id"]))
 
 
+_turn = {"n": 0}
+
+
 def _worker():
     """Analyze anything new in the background: on startup (whole backlog), and after each sync adds media."""
     while True:
@@ -184,7 +187,9 @@ def _worker():
             from . import activity
             activity.wait_idle()
             ids = pending()
-            if not ids and color_batch():
+            # color reading and AI scanning take turns, so both move along
+            turn = _turn["n"] = _turn["n"] + 1
+            if not ids and turn % 2 and color_batch():
                 continue
             if not ids:
                 from . import ai
@@ -193,7 +198,7 @@ def _worker():
                 except Exception:
                     traceback.print_exc()
                     tagged = 0
-                if not tagged:
+                if not tagged and not color_batch():
                     time.sleep(10)
                 continue
             for mid in ids:

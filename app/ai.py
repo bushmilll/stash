@@ -489,7 +489,8 @@ def scan_batch():
         return 0
     from . import activity
     nxt = upcoming()
-    rows = [(r, active()) for r in scan_pending()]
+    # while a newer model is taking over, scan only with that one (an old-model scan would be thrown away)
+    rows = [] if nxt and installed(nxt) else [(r, active()) for r in scan_pending()]
     if not rows and nxt and installed(nxt):
         rows = [(r, nxt) for r in scan_pending(name=nxt)]
         if not rows:
