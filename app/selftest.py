@@ -109,6 +109,17 @@ def run(port):
         moments = analyze._video_moments(cv, 4)
         teal = [t for t, im_ in moments if any(abs(c_[1] + 30) < 15 and abs(c_[2] + 8) < 15 for c_ in analyze._frame_colors(im_))]
         check("color: teal found in the second half of a clip", bool(teal) and min(teal) >= 1.5, f"{len(moments)} moments, teal at {teal}")
+        # converting downloads: the Mac's video chip (fast), checked on the build Macs
+        if sys.platform == "darwin":
+            from app import sync as _sync
+            vt = tmp / "vt.mp4"
+            try:
+                _sync._bg_run([media.FFMPEG, "-v", "error", "-y", "-i", str(vid), "-c:v", "h264_videotoolbox", "-b:v", "8M", "-pix_fmt", "yuv420p", str(vt)])
+                check("video chip converts downloads", vt.exists() and vt.stat().st_size > 1000)
+            except Exception as e:
+                print(f"  (video chip not available here, downloads use the x264 fallback: {e})", flush=True)
+                if on_ci:
+                    print(f"::notice title=Video chip::not available on this runner ({e})", flush=True)
         # moodboard video: one still layer + one looping tile
         from app import boardvideo
         Image.new("RGB", (640, 360), (236, 234, 229)).save(tmp / "layer0.png")

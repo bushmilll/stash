@@ -332,8 +332,20 @@ def _dash_streams(manifest):
     if not videos:
         raise ValueError("no video streams in manifest")
     best_v = max(videos, key=lambda r: (r["w"] * r["h"], r["codecs"].startswith(COMPAT), r["bw"]))
+    # Instagram often has the same picture in H.264 too: take that when it's just as sharp, so nothing needs converting
+    compat = [r for r in videos if r["codecs"].startswith(COMPAT) and r["w"] * r["h"] >= 0.95 * best_v["w"] * best_v["h"]]
+    if compat:
+        best_v = max(compat, key=lambda r: (r["w"] * r["h"], r["bw"]))
     best_a = max(audios, key=lambda r: r["bw"]) if audios else None
     return best_v, best_a
+
+
+def _bg_run(cmd, timeout=900):
+    """ffmpeg at low priority, so converting downloads never makes the app feel slow."""
+    from . import activity
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **activity.low_priority())
+    if p.returncode != 0:
+        raise RuntimeError((p.stderr or "ffmpeg failed").strip().splitlines()[-1][:300] if (p.stderr or "").strip() else "ffmpeg failed")
 
 
 def _download_dash(manifest, dest, headers=None):
@@ -349,12 +361,18 @@ def _download_dash(manifest, dest, headers=None):
         cmd = [media.FFMPEG, "-y", "-v", "error", "-i", str(tmp_v)] + (["-i", str(tmp_a)] if a else [])
         cmd += ["-map", "0:v:0"] + (["-map", "1:a:0"] if a else [])
         if v["codecs"].startswith(COMPAT):
-            cmd += ["-c", "copy"]
+            media.run(cmd + ["-c", "copy", "-movflags", "+faststart", str(out)], timeout=900)
         else:
-            # VP9 / AV1 only: convert to high-quality H.264 so it plays and exports everywhere
-            cmd += ["-c:v", "libx264", "-crf", "15", "-preset", "medium", "-pix_fmt", "yuv420p", "-c:a", "copy"]
-        cmd += ["-movflags", "+faststart", str(out)]
-        media.run(cmd, timeout=900)
+            # VP9 / AV1 only: convert to H.264 so it plays and exports everywhere (Resolve included).
+            # The Mac's video chip does it in a few seconds at a generous bitrate (3x the VP9 stream, which is
+            # ~2x as efficient as H.264, so the copy keeps all the detail); without it, a fast x264 pass.
+            rate = int(min(60e6, max(8e6, 3 * (v["bw"] or 4e6))))
+            tail = ["-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", str(out)]
+            try:
+                _bg_run(cmd + ["-c:v", "h264_videotoolbox", "-b:v", str(rate), "-maxrate", str(int(rate * 1.5)),
+                               "-bufsize", str(rate * 2), "-profile:v", "high"] + tail)
+            except Exception:
+                _bg_run(cmd + ["-c:v", "libx264", "-crf", "15", "-preset", "veryfast"] + tail)
         out.replace(dest)
     finally:
         for p in (tmp_v, tmp_a, out):
