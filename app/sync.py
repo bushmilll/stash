@@ -332,9 +332,24 @@ def _dash_streams(manifest):
     if not videos:
         raise ValueError("no video streams in manifest")
     best_v = max(videos, key=lambda r: (r["w"] * r["h"], r["codecs"].startswith(COMPAT), r["bw"]))
-    # Instagram often has the same picture in H.264 too: take that when it's just as sharp, so nothing needs converting
-    compat = [r for r in videos if r["codecs"].startswith(COMPAT) and r["w"] * r["h"] >= 0.95 * best_v["w"] * best_v["h"]]
-    if compat:
+    # Instagram often has the same picture in H.264 too: take that only when it's the full resolution AND has the
+    # bits to match (H.264 needs ~40% more data than VP9/AV1 for the same detail; HEVC is on par), so nothing
+    # needs converting. Otherwise the sharper VP9/AV1 version is converted at a generous bitrate.
+    top = best_v["w"] * best_v["h"]
+    other = [r for r in videos if r["w"] * r["h"] >= top and not r["codecs"].startswith(COMPAT)]
+    ref = max(other, key=lambda r: r["bw"]) if other else None     # the sharpest VP9/AV1 version, if any
+
+    def _as_good(r):
+        if not r["codecs"].startswith(COMPAT) or r["w"] * r["h"] < top:
+            return False
+        if not ref or not ref["bw"]:
+            return True
+        need = 1.0 if r["codecs"].startswith(("hvc1", "hev1")) else 1.4
+        return (r["bw"] or 0) >= need * ref["bw"]
+    compat = [r for r in videos if _as_good(r)]
+    if ref and not compat:
+        best_v = ref
+    elif compat:
         best_v = max(compat, key=lambda r: (r["w"] * r["h"], r["bw"]))
     best_a = max(audios, key=lambda r: r["bw"]) if audios else None
     return best_v, best_a
