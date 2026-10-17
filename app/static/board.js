@@ -521,7 +521,7 @@ const Board = (() => {
   function clipPanel() {
     const panel = $("#clipPanel");
     const it = B && isVideo(selected) ? selected : null;
-    if (!it) { panel.hidden = true; if (clip?.video) clip.video.pause(); clip = null; fill(panel); return; }
+    if (!it) { panel.hidden = true; clipBig(false); if (clip?.video) clip.video.pause(); clip = null; fill(panel); return; }
     if (clip?.it === it) { clipUpdate(); return; }
     const v = h("video", { src: it.src, muted: true, playsinline: true, preload: "auto", poster: it.poster_src || it.thumb_src });
     v.muted = true;
@@ -534,6 +534,8 @@ const Board = (() => {
       clipUpdate();
     });
     v.addEventListener("play", clipUpdate); v.addEventListener("pause", clipUpdate);
+    v.addEventListener("click", () => { if (panel.classList.contains("big")) v.paused ? v.play() : v.pause(); });
+    v.addEventListener("dblclick", () => clipBig());
     const btn = (label, title, fn, id) => h("button", { class: "cell", title, onclick: fn, id }, label);
     fill(panel,
       h("div", { class: "clip-video" }, v),
@@ -549,24 +551,34 @@ const Board = (() => {
           btn("Out", "Loop ends here (O). Click again to clear", () => clipOut(true), "clipOut"),
           btn("Preview", "Play just the loop (P)", clipPreview, "clipPreview"),
           btn("No loop", "Stop looping this tile", clipClear, "clipClear"),
-          btn("Use as still", "Show this frame on the board and in PNG / PDF exports (S)", clipStill, "clipStillBtn")),
+          btn("Use as still", "Show this frame on the board and in PNG / PDF exports (S)", clipStill, "clipStillBtn"),
+          btn("Larger view", "Look at it bigger (E). Esc comes back", () => clipBig(), "clipBig")),
         h("p", { class: "clip-hint" }, "Set In and Out to loop that section on the board and in video exports. The still is what static exports show.")));
     panel.hidden = false;
     clipUpdate();
+  }
+  // the same panel, blown up over the board: same video, same controls, nothing lost going back and forth
+  function clipBig(on) {
+    const panel = $("#clipPanel");
+    on = on === undefined ? !panel.classList.contains("big") : on;
+    if (on && !clip) return;
+    panel.classList.toggle("big", on);
+    const b = $("#clipBig"); if (b) { b.textContent = on ? "Smaller view" : "Larger view"; b.classList.toggle("on", on); }
   }
   function clipUpdate() {
     if (!clip) return;
     const { it, video: v } = clip, d = v.duration || 1;
     const pct = (t) => `${(t / d) * 100}%`;
     const fmt = (t) => (t == null ? "–" : fmtTime(t));
-    $("#clipTc").textContent = fmtTime(v.currentTime);
-    $("#clipPlay").textContent = v.paused ? "Play" : "Pause";
-    $("#clipIn").textContent = "In " + fmt(it.vin);
-    $("#clipOut").textContent = "Out " + (it.vin != null ? fmt(it.vout ?? v.duration) : "–");
+    const tx = (id, t) => { const el = $(id); if (el && el.textContent !== t) el.textContent = t; };   // untouched unless changed: keeps clicks reliable
+    tx("#clipTc", fmtTime(v.currentTime));
+    tx("#clipPlay", v.paused ? "Play" : "Pause");
+    tx("#clipIn", "In " + fmt(it.vin));
+    tx("#clipOut", "Out " + (it.vin != null ? fmt(it.vout ?? v.duration) : "–"));
     $("#clipClear").disabled = it.vin == null;
     $("#clipPreview").disabled = it.vin == null;
-    $("#clipPreview").textContent = clip.preview && !v.paused ? "Stop preview" : "Preview";
-    $("#clipStillBtn").textContent = "Use as still" + (it.still != null ? " (" + fmt(it.still) + ")" : "");
+    tx("#clipPreview", clip.preview && !v.paused ? "Stop preview" : "Preview");
+    tx("#clipStillBtn", "Use as still" + (it.still != null ? " (" + fmt(it.still) + ")" : ""));
     const scrub = $("#clipPanel input[type=range]"); if (scrub && document.activeElement !== scrub) scrub.value = v.currentTime;
     const r = $("#clipLoop");
     r.style.display = it.vin != null ? "block" : "none";
@@ -998,6 +1010,7 @@ const Board = (() => {
     document.addEventListener("keydown", (e) => {
       if (!B || $("#board").hidden || $("#modalRoot").children.length) return;
       const typing = editing || /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName) && document.activeElement.type !== "range";
+      if (e.key === "Escape" && $("#clipPanel").classList.contains("big")) { e.preventDefault(); clipBig(false); return; }
       if (e.key === "Escape") { e.preventDefault(); if (typing) document.activeElement.blur(); else if (selected) select(null); else close(); return; }
       if (typing) return;
       const k = e.key.toLowerCase();
@@ -1012,7 +1025,7 @@ const Board = (() => {
       }
       if (clip) {   // the selected video tile's panel
         const v = clip.video;
-        const keys = { i: () => clipIn(true), o: () => clipOut(true), s: clipStill, p: clipPreview, " ": () => (v.paused ? v.play() : v.pause()),
+        const keys = { e: () => clipBig(), i: () => clipIn(true), o: () => clipOut(true), s: clipStill, p: clipPreview, " ": () => (v.paused ? v.play() : v.pause()),
           ",": () => { v.pause(); v.currentTime = Math.max(0, v.currentTime - 1 / 30); },
           ".": () => { v.pause(); v.currentTime = Math.min(v.duration, v.currentTime + 1 / 30); } };
         if (keys[k]) { e.preventDefault(); keys[k](); return; }

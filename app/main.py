@@ -23,7 +23,13 @@ SORTS = {
     "saved_old": "COALESCE(p.saved_at, p.added_at) ASC, p.id ASC",
     "posted": "p.posted_at DESC NULLS LAST, p.id DESC",
     "random": "RANDOM()",
+    "fav": "COALESCE(p.fav_at, 0) DESC, COALESCE(p.saved_at, p.added_at) DESC, p.id DESC",
+    "fav_old": "COALESCE(p.fav_at, 0) ASC, COALESCE(p.saved_at, p.added_at) ASC, p.id ASC",
 }
+
+
+def _now_ms():
+    return int(time.time() * 1000)
 
 
 def err(status, msg):
@@ -217,13 +223,21 @@ async def list_posts(request):
     # Favorites: every slide you starred in a carousel is its own tile
     entries = [(i, None) for i in ids]
     if qp.get("favorite"):
-        starred = {}
-        for pid_, fs in c.execute("SELECT id, fav_slides FROM posts WHERE favorite=1 AND fav_slides IS NOT NULL"):
+        starred, when = {}, {}
+        for pid_, fs, fa, fsa in c.execute("SELECT id, fav_slides, fav_at, fav_slide_at FROM posts WHERE favorite=1"):
+            when[pid_] = fa or 0
             try:
-                starred[pid_] = sorted(set(json.loads(fs or "[]")))
+                if fs:
+                    at = json.loads(fsa or "{}")
+                    starred[pid_] = [(k, at.get(str(k), fa or 0)) for k in sorted(set(json.loads(fs)))]
             except Exception:
                 pass
-        entries = [(i, k) for i in ids for k in (starred.get(i) or [None])]
+        entries = [(i, k, t) for i in ids for k, t in (starred.get(i) or [(None, when.get(i, 0))])]
+        sort = qp.get("sort")
+        if sort in ("fav", "fav_old"):   # each starred slide sits where you starred it
+            pos = {i: n for n, i in enumerate(ids)}
+            entries.sort(key=lambda e: ((-e[2] if sort == "fav" else e[2]), pos[e[0]]))
+        entries = [(i, k) for i, k, _ in entries]
     page_entries = entries[offset:offset + limit]
     page = list(dict.fromkeys(i for i, _ in page_entries))
     rows = {r["id"]: r for r in c.execute(f"SELECT * FROM posts WHERE id IN ({','.join('?' * len(page))})", page)} if page else {}
@@ -328,19 +342,28 @@ async def update_post(request):
         if "notes" in body:
             c.execute("UPDATE posts SET notes=? WHERE id=?", (str(body["notes"])[:20000], pid))
         if "favorite" in body:
-            c.execute("UPDATE posts SET favorite=? WHERE id=?", (1 if body["favorite"] else 0, pid))
-            if not body["favorite"]:
-                c.execute("UPDATE posts SET fav_slides=NULL WHERE id=?", (pid,))
+            if body["favorite"]:
+                c.execute("UPDATE posts SET favorite=1, fav_at=CASE WHEN favorite=1 THEN fav_at ELSE ? END WHERE id=?", (_now_ms(), pid))
+            else:
+                c.execute("UPDATE posts SET favorite=0, fav_at=NULL, fav_slides=NULL, fav_slide_at=NULL WHERE id=?", (pid,))
         if "fav_slide" in body:   # star or un-star one slide of a carousel; the post is a favorite while any slide is
-            row = c.execute("SELECT fav_slides FROM posts WHERE id=?", (pid,)).fetchone()
+            row = c.execute("SELECT fav_slides, fav_slide_at, favorite, fav_at FROM posts WHERE id=?", (pid,)).fetchone()
             try:
                 slides = set(json.loads((row[0] if row else None) or "[]"))
+                at = json.loads((row[1] if row else None) or "{}")
             except Exception:
-                slides = set()
+                slides, at = set(), {}
             k = max(0, int(body["fav_slide"] or 0))
-            (slides.add if body.get("on", True) else slides.discard)(k)
-            c.execute("UPDATE posts SET fav_slides=?, favorite=? WHERE id=?",
-                      (json.dumps(sorted(slides)) if slides else None, 1 if slides else 0, pid))
+            if body.get("on", True):
+                if k not in slides:
+                    at[str(k)] = _now_ms()
+                slides.add(k)
+            else:
+                slides.discard(k); at.pop(str(k), None)
+            fav_at = (row[3] if row and row[2] else None) or (max(at.values()) if at else None)
+            c.execute("UPDATE posts SET fav_slides=?, fav_slide_at=?, favorite=?, fav_at=? WHERE id=?",
+                      (json.dumps(sorted(slides)) if slides else None, json.dumps(at) if slides else None,
+                       1 if slides else 0, fav_at if slides else None, pid))
         for name in body.get("add_tags", []):
             if name.strip():
                 tid = db.get_or_create(c, "tags", name.strip().lstrip("#"))
@@ -366,9 +389,13 @@ async def bulk(request):
     ids = [int(i) for i in body.get("ids", [])][:5000]
     with db.tx() as c:
         if "favorite" in body:
-            c.executemany("UPDATE posts SET favorite=? WHERE id=?", [(1 if body["favorite"] else 0, pid) for pid in ids])
-            if not body["favorite"]:
-                c.executemany("UPDATE posts SET fav_slides=NULL WHERE id=?", [(pid,) for pid in ids])
+            if body["favorite"]:
+                t = _now_ms()
+                c.executemany("UPDATE posts SET favorite=1, fav_at=CASE WHEN favorite=1 THEN fav_at ELSE ? END WHERE id=?",
+                              [(t, pid) for pid in ids])
+            else:
+                c.executemany("UPDATE posts SET favorite=0, fav_at=NULL, fav_slides=NULL, fav_slide_at=NULL WHERE id=?",
+                              [(pid,) for pid in ids])
         for pid in ids:
             for name in body.get("add_tags", []):
                 tid = db.get_or_create(c, "tags", name.strip().lstrip("#"))

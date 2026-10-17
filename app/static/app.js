@@ -210,10 +210,22 @@ function lockPage(on) {
 }
 window.lockPage = lockPage;
 const DESKTOP = new URLSearchParams(location.search).has("app");
+const SORT_OPTS = [
+  { value: "saved", label: "Newest saves" }, { value: "saved_old", label: "Oldest saves" },
+  { value: "posted", label: "Newest posts" }, { value: "random", label: "Shuffle" }];
+const FAV_SORTS = [{ value: "fav", label: "Newest favs" }, { value: "fav_old", label: "Oldest favs" }];
+// in Favorites the Sort menu also offers newest / oldest favs (and remembers your pick for next time you're there)
+function syncSortOptions() {
+  const sel = $("#sort"); if (!sel) return;
+  const inFav = !!S.filter.favorite, isFav = S.sort === "fav" || S.sort === "fav_old";
+  sel.setOptions(inFav ? [...FAV_SORTS, ...SORT_OPTS] : SORT_OPTS);
+  if (!inFav && isFav) { S.favSort = S.sort; S.sort = "saved"; }
+  else if (inFav && !isFav && S.favSort && S.sortBeforeFav === undefined) { S.sortBeforeFav = S.sort; S.sort = S.favSort; }
+  if (!inFav && S.sortBeforeFav !== undefined) { S.sort = S.sortBeforeFav; delete S.sortBeforeFav; }
+  sel.value = S.sort; shuffleUI();
+}
 {   // the Sort menu in the top bar
-  const sort = pick({ label: "Sort", value: "saved", options: [
-    { value: "saved", label: "Newest saves" }, { value: "saved_old", label: "Oldest saves" },
-    { value: "posted", label: "Newest posts" }, { value: "random", label: "Shuffle" }] });
+  const sort = pick({ label: "Sort", value: "saved", options: SORT_OPTS });
   sort.id = "sort"; sort.classList.add("plain-on");
   const again = h("button", { id: "reshuffle", class: "shuf", title: "Shuffle again", "aria-label": "Shuffle again", hidden: true });
   const back = h("button", { id: "unshuffle", class: "shuf", title: "Back to the last shuffle", "aria-label": "Back to the last shuffle", hidden: true });
@@ -720,6 +732,12 @@ function sharpImg(m, sizes = "420px") {
   if (full && fullW > 560) attrs.srcset = `${m.thumb_src} 520w, ${full} ${fullW}w`;
   return h("img", attrs);
 }
+// the @creator on a tile: a link straight to everything you've saved from them
+function whoLink(p) {
+  if (!p.username) return null;
+  return h("span", { class: "who-link", role: "link", title: `Everything you've saved from @${p.username}`,
+    onclick: (e) => { e.stopPropagation(); e.preventDefault(); setFilter({ creator: p.username }, false); window.scrollTo(0, 0); } }, "@" + p.username);
+}
 function tile(p, i, ratio) {
   const m = p.media[0] || {};
   const isVideo = m.kind === "video";
@@ -732,9 +750,9 @@ function tile(p, i, ratio) {
     "data-slide": p.fav_slide != null ? p.fav_slide : null, draggable: "true", "aria-label": `Post ${i + 1} by ${p.username || "unknown"}` }, box);
   if (S.view === "index") {
     el.append(h("span", { class: "cap" }, h("span", { class: "n" }, num), h("span", { class: "k" }, (p.favorite ? "★ " : "") + kindLabel(p))),
-      h("span", { class: "who" }, p.username ? "@" + p.username : p.shortcode));
+      h("span", { class: "who" }, p.username ? whoLink(p) : p.shortcode));
   } else {
-    el.append(h("span", { class: "meta" }, h("span", {}, num + " " + (p.username ? "@" + p.username : "")),
+    el.append(h("span", { class: "meta" }, h("span", { class: "meta-who" }, num + " ", whoLink(p)),
       h("span", {}, [(m.ar_label || ""), m.kind === "video" ? fmtTime(m.duration).replace(/\.\d\d$/, "") : p.media_count > 1 ? p.media_count + " img" : ""].filter(Boolean).join(" / "))));
   }
   el.addEventListener("click", (e) => {
@@ -807,6 +825,7 @@ async function loadMore() {
 }
 function reload() {
   S.opened = new Set();
+  syncSortOptions();
   loadFacets();
   S.gen++; S.items = []; S.offset = 0; S.more = true; S.total = null; S.loading = false;
   layout(true); renderScope(); loadMore();
@@ -1010,15 +1029,16 @@ function updateDeck() {
   const pct = (t) => `${(t / d) * 100}%`;
   $("#head").style.left = pct(v.currentTime);
   $("#played").style.width = pct(v.currentTime);
-  $("#tc").textContent = fmtTime(v.currentTime);
-  $("#play").textContent = v.paused ? "Play" : "Pause";
-  $("#mute").textContent = v.muted ? "Unmute" : "Mute";
+  // only rewrite a label when it changes: rewriting it under the pointer can swallow the click in the Mac app
+  setText($("#tc"), fmtTime(v.currentTime));
+  setText($("#play"), v.paused ? "Play" : "Pause");
+  setText($("#mute"), v.muted ? "Unmute" : "Mute");
   if (V.preview && !v.paused) {
     const a = S.inPt ?? 0, b = S.outPt ?? v.duration;
     if (v.currentTime >= b - 0.03 || v.currentTime < a - 0.1) v.currentTime = a;
   }
   const pv = $("#preview");
-  pv.disabled = S.inPt == null && S.outPt == null; pv.textContent = V.preview ? "Stop preview" : "Preview";
+  pv.disabled = S.inPt == null && S.outPt == null; setText(pv, V.preview ? "Stop preview" : "Preview");
   pv.classList.toggle("on", !!V.preview);
   const mi = $("#markIn"), mo = $("#markOut"), r = $("#range");
   mi.classList.toggle("on", S.inPt != null); mo.classList.toggle("on", S.outPt != null);
@@ -1027,15 +1047,21 @@ function updateDeck() {
   const a = S.inPt ?? 0, b = S.outPt ?? d;
   r.style.display = S.inPt != null || S.outPt != null ? "block" : "none";
   r.style.left = pct(a); r.style.width = pct(Math.max(0, b - a));
-  $("#inTc").textContent = S.inPt != null ? fmtTime(S.inPt) : "–";
-  $("#outTc").textContent = S.outPt != null ? fmtTime(S.outPt) : "–";
+  setText($("#inTc"), S.inPt != null ? fmtTime(S.inPt) : "–");
+  setText($("#outTc"), S.outPt != null ? fmtTime(S.outPt) : "–");
   const range = $("#clipRange");
-  if (range) range.textContent = `${fmtTime(a)} → ${fmtTime(b)} / ${(b - a).toFixed(1)}S`;
+  if (range) setText(range, `${fmtTime(a)} → ${fmtTime(b)} / ${(b - a).toFixed(1)}S`);
 }
+function setText(el, t) { if (el && el.textContent !== t) el.textContent = t; }
 // videos open muted; once you unmute, sound stays on as you move between posts (until Stash is closed)
 function toggleMute() {
   V.sound = !V.sound;
-  if (V.video) { V.video.muted = !V.sound; if (V.sound && V.video.paused) V.video.play().catch(() => {}); }
+  const v = V.video;
+  if (v) {
+    v.muted = !V.sound; v.defaultMuted = !V.sound;
+    // re-issuing play() inside the click lets WebKit start the sound on a clip that's already playing
+    if (V.sound) { const was = !v.paused; v.play().catch(() => {}); if (was) setTimeout(() => { if (v.paused) v.play().catch(() => {}); }, 150); }
+  }
   updateDeck();
 }
 $("#mute").onclick = toggleMute;
@@ -1601,7 +1627,9 @@ $("#q").addEventListener("input", () => {
   clearTimeout(qTimer);
   qTimer = setTimeout(() => { S.filter.q = $("#q").value.trim(); if (!S.filter.q) delete S.filter.q; writeHash(); reload(); }, 220);
 });
-$("#sort").onchange = () => { S.sort = $("#sort").value; S.seed = Math.floor(Math.random() * 1e6); S.seeds = []; shuffleUI(); try { localStorage.setItem("sf-sort", S.sort); } catch {} reload(); navCommit(); };
+$("#sort").onchange = () => { S.sort = $("#sort").value;
+  if (S.filter.favorite) S.favSort = S.sort === "fav" || S.sort === "fav_old" ? S.sort : null;
+  delete S.sortBeforeFav; S.seed = Math.floor(Math.random() * 1e6); S.seeds = []; shuffleUI(); try { localStorage.setItem("sf-sort", S.sort); } catch {} reload(); navCommit(); };
 // Shuffle: deal again, or go back to the one before
 function shuffleUI() {
   $("#reshuffle").hidden = S.sort !== "random";

@@ -179,6 +179,9 @@ def init():
         if "fav_slides" not in cols:   # every slide of a carousel you favorited, e.g. [0, 3]
             c.execute("ALTER TABLE posts ADD COLUMN fav_slides TEXT")
             c.execute("UPDATE posts SET fav_slides='[' || COALESCE(fav_idx, 0) || ']' WHERE favorite=1 AND COALESCE(fav_idx, 0) > 0")
+        if "fav_at" not in cols:   # when you favorited it (Favorites can sort by newest / oldest favs)
+            c.execute("ALTER TABLE posts ADD COLUMN fav_at INTEGER")
+            c.execute("ALTER TABLE posts ADD COLUMN fav_slide_at TEXT")   # {"slide": time} for starred carousel slides
         if "saved_src" not in cols:
             # where the "saved" time came from: 'export' = real date from Instagram's data export,
             # 'feed' = estimated from the order of the collection feed. Older rows: an export date is
