@@ -187,6 +187,8 @@ def _tiered(c, ids, scores, qp, n_tiers=3):
     else:   # ranked by likeness without a score: thirds by position
         tier = {i: min(n_tiers - 1, n * n_tiers // len(ids)) for n, i in enumerate(ids)}
     srt = qp.get("sort") or "saved"
+    if srt == "best":   # Best match: strictly by how well each one matches
+        return ids
     if srt == "random":
         import random
         rnd = random.Random(int(qp.get("seed") or 0))
