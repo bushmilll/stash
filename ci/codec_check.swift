@@ -2,6 +2,7 @@
 import AVFoundation
 import WebKit
 import AppKit
+setbuf(stdout, nil)
 
 let path = CommandLine.arguments[1]
 let url = URL(fileURLWithPath: path)
@@ -27,6 +28,7 @@ class D: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     }
 }
 let app = NSApplication.shared
+app.setActivationPolicy(.accessory)
 let d = D()
 let cfg = WKWebViewConfiguration()
 cfg.mediaTypesRequiringUserActionForPlayback = []
@@ -46,5 +48,9 @@ setTimeout(()=>r('TIMEOUT readyState='+v.readyState+' canPlay='+v.canPlayType('v
 """
 let page = dir.appendingPathComponent("t.html")
 try! html.write(to: page, atomically: true, encoding: .utf8)
+let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 400), styleMask: [.titled], backing: .buffered, defer: false)
+win.contentView = web
+win.orderFrontRegardless()
 web.loadFileURL(page, allowingReadAccessTo: dir)
+DispatchQueue.main.asyncAfter(deadline: .now() + 20) { print("::notice title=\(url.lastPathComponent) Stash window::no answer from the page in 20s"); exit(0) }
 app.run()
