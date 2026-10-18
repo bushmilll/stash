@@ -189,8 +189,8 @@ button.cell:hover { background: var(--ink); color: var(--paper); }
 .tile .cap { display: flex; justify-content: space-between; gap: 8px; margin-top: 6px; font-family: var(--mono); font-size: var(--fs-xs); color: var(--ink); line-height: 1.3; }
 .tile .cap .k { color: var(--ink-3); text-transform: uppercase; }
 .who-link { cursor: pointer; text-underline-offset: 2px; }
-.who-link:hover { text-decoration: underline; color: var(--ink); }
-.grid.frames .who-link:hover { color: #fff; }
+.who-link:hover, .who-link.hov { text-decoration: underline; color: var(--ink); }
+.grid.frames .who-link:hover, .grid.frames .who-link.hov { color: #fff; }
 .meta-who { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tile .who { display: block; font-family: var(--mono); font-size: var(--fs-xs); color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tile .fav { color: var(--signal); }

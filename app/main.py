@@ -197,6 +197,19 @@ async def matching_ids(qp, skip=()):
                     if sc >= 0.08:
                         scored.append((sc * 0.5, i))
             ids = [i for _, i in scored] if ranked is not None else [i for _, i in sorted(scored, key=lambda t: -t[0])]
+        srt = qp.get("sort") or "best"
+        if srt != "best" and srt in SORTS and ids:   # you picked an order: same matches, put in that order
+            if srt == "random":
+                import random
+                ids = sorted(ids)
+                random.Random(int(qp.get("seed") or 0)).shuffle(ids)
+            else:
+                order = [r[0] for r in c.execute(
+                    f"SELECT p.id FROM posts p WHERE p.id IN (SELECT value FROM json_each(?)) ORDER BY {SORTS[srt]}",
+                    (json.dumps(ids),))]
+                pos = {i: n for n, i in enumerate(order)}
+                ids = sorted(ids, key=lambda i: pos.get(i, 1 << 30))
+            return ids, hits, True
         return ids, hits, True
     order = SORTS.get(qp.get("sort", "saved"), SORTS["saved"])
     shuffle = qp.get("sort") == "random" and qp.get("seed")
