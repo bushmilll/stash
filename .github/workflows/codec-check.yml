@@ -1,0 +1,34 @@
+name: Codec check
+on:
+  push:
+    branches: ["ai-codec*"]
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install imageio-ffmpeg
+      - name: Make test files
+        run: |
+          FF=$(python -c "import imageio_ffmpeg;print(imageio_ffmpeg.get_ffmpeg_exe())")
+          mkdir -p t && cd t
+          # a 1080x1920 VP9 clip in an MP4 (how Instagram serves its sharpest version), with AAC sound
+          $FF -v error -f lavfi -i testsrc2=size=1080x1920:rate=30:duration=4 -f lavfi -i sine=d=4 -c:v libvpx-vp9 -b:v 2M -c:a aac -movflags +faststart -shortest vp9.mp4
+          # the same stream re-wrapped untouched (what Stash would store): fragmented in, plain MP4 out
+          $FF -v error -i vp9.mp4 -c copy -movflags frag_keyframe+empty_moov frag.mp4
+          $FF -v error -i frag.mp4 -c copy -tag:v vp09 -movflags +faststart stored.mp4
+          $FF -v error -i stored.mp4 -c copy stored.mov
+          $FF -v error -i vp9.mp4 -c:v libx264 -crf 15 h264.mp4
+          ls -la; $FF -hide_banner -i stored.mp4 2>&1 | grep Stream || true
+      - name: Check playback
+        run: |
+          cd t
+          for f in stored.mp4 stored.mov h264.mp4; do
+            swift ../ci/codec_check.swift "$PWD/$f" || echo "::notice title=$f::swift exited $?"
+          done
