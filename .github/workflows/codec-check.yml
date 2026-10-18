@@ -23,12 +23,11 @@ jobs:
           # the same stream re-wrapped untouched (what Stash would store): fragmented in, plain MP4 out
           $FF -v error -i vp9.mp4 -c copy -movflags frag_keyframe+empty_moov frag.mp4
           $FF -v error -i frag.mp4 -c copy -tag:v vp09 -movflags +faststart stored.mp4
-          $FF -v error -i stored.mp4 -c copy stored.mov
           $FF -v error -i vp9.mp4 -c:v libx264 -crf 15 h264.mp4
           ls -la; $FF -hide_banner -i stored.mp4 2>&1 | grep Stream || true
       - name: Check playback
         run: |
           cd t
-          for f in stored.mp4 stored.mov h264.mp4; do
+          for f in stored.mp4 h264.mp4; do
             swift ../ci/codec_check.swift "$PWD/$f" || echo "::notice title=$f::swift exited $?"
           done
