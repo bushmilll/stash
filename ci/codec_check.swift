@@ -8,7 +8,7 @@ let url = URL(fileURLWithPath: path)
 let asset = AVURLAsset(url: url)
 let sem = DispatchSemaphore(value: 0)
 var playable = false, decoded = 0
-Task {
+Task.detached {
     playable = (try? await asset.load(.isPlayable)) ?? false
     if let track = try? await asset.loadTracks(withMediaType: .video).first, let reader = try? AVAssetReader(asset: asset) {
         let out = AVAssetReaderTrackOutput(track: track, outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])

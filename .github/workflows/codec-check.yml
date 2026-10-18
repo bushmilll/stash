@@ -29,5 +29,5 @@ jobs:
         run: |
           cd t
           for f in stored.mp4 h264.mp4; do
-            swift ../ci/codec_check.swift "$PWD/$f" || echo "::notice title=$f::swift exited $?"
+            perl -e 'alarm 120; exec @ARGV' swift ../ci/codec_check.swift "$PWD/$f" || echo "::notice title=$f::swift exited $?"
           done
