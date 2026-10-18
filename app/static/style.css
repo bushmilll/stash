@@ -689,3 +689,5 @@ html, body, .app { overflow-x: clip; }
 /* starred carousel slides in the post view */
 .slides button { position: relative; }
 .slides button.starred::after { content: "★"; position: absolute; right: 2px; top: 0; color: var(--signal); font-size: 11px; line-height: 1.2; text-shadow: 0 0 2px #000; }
+
+video.pv-wait { opacity: 0; }

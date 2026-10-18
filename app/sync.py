@@ -304,6 +304,7 @@ def _download(url, dest, headers=None, tries=3):
 
 # ---------- best-quality video (Instagram's DASH streams) ----------
 
+GOP = "30"   # a full frame about every second: clean jumps when previews start mid-clip, smooth scrubbing in Resolve
 COMPAT = ("avc1", "avc3", "hvc1", "hev1")   # codecs every Mac plays natively
 
 
@@ -385,9 +386,9 @@ def _download_dash(manifest, dest, headers=None):
             tail = ["-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", str(out)]
             try:
                 _bg_run(cmd + ["-c:v", "h264_videotoolbox", "-b:v", str(rate), "-maxrate", str(int(rate * 1.5)),
-                               "-bufsize", str(rate * 2), "-profile:v", "high"] + tail)
+                               "-bufsize", str(rate * 2), "-profile:v", "high", "-g", GOP] + tail)
             except Exception:
-                _bg_run(cmd + ["-c:v", "libx264", "-crf", "15", "-preset", "veryfast"] + tail)
+                _bg_run(cmd + ["-c:v", "libx264", "-crf", "15", "-preset", "veryfast", "-g", GOP] + tail)
         out.replace(dest)
     finally:
         for p in (tmp_v, tmp_a, out):

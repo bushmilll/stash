@@ -749,6 +749,18 @@ function whoLink(p) {
 // set it themselves
 document.addEventListener("mouseover", (e) => { const l = e.target.closest?.(".who-link"); if (l) l.classList.add("hov"); });
 document.addEventListener("mouseout", (e) => { const l = e.target.closest?.(".who-link"); if (l && !l.contains(e.relatedTarget)) l.classList.remove("hov"); });
+// A muted preview that starts cleanly at t: it lands on the moment first, then plays, and stays invisible until
+// real frames are showing. Jumping while it's already playing is what made some previews glitch in the Mac app.
+function startAt(src, t, { loop = false } = {}) {
+  const v = h("video", { src, muted: true, loop, playsinline: true, preload: "auto", class: "pv-wait" });
+  v.muted = true;
+  const go = () => v.play().catch(() => {});
+  v.addEventListener("playing", () => requestAnimationFrame(() => requestAnimationFrame(() => v.classList.remove("pv-wait"))), { once: true });
+  if (t > 0) {
+    v.addEventListener("loadedmetadata", () => { v.addEventListener("seeked", go, { once: true }); v.currentTime = t; }, { once: true });
+  } else v.addEventListener("loadeddata", go, { once: true });
+  return v;
+}
 function tile(p, i, ratio) {
   const m = p.media[0] || {};
   const isVideo = m.kind === "video";
@@ -800,10 +812,8 @@ function tile(p, i, ratio) {
     let v, timer;
     el.addEventListener("mouseenter", () => {
       timer = setTimeout(() => {
-        v = h("video", { src: m.src, muted: true, loop: true, playsinline: true, preload: "auto" });
-        v.muted = true;
-        if (hit && hit.t >= 0.5) v.addEventListener("loadedmetadata", () => { v.currentTime = hit.t; }, { once: true });
-        box.append(v); v.play().catch(() => {});
+        v = startAt(m.src, hit && hit.t >= 0.5 ? hit.t : 0, { loop: true });
+        box.append(v);
       }, 180);
     });
     el.addEventListener("mouseleave", () => { clearTimeout(timer); if (v) { v.pause(); v.remove(); v = null; } });
@@ -1019,10 +1029,19 @@ function renderStage() {
     v.addEventListener("click", togglePlay);
     v.addEventListener("timeupdate", updateDeck);
     v.addEventListener("loadedmetadata", updateDeck);
-    if (S.seekTo != null) { const t = S.seekTo; S.seekTo = null; v.addEventListener("loadedmetadata", () => { v.currentTime = t; }, { once: true }); }
+    let seekFirst = false;
+    if (S.seekTo != null) {   // land on the matched moment before playing (no jump mid-playback)
+      const t = S.seekTo; S.seekTo = null; seekFirst = true;
+      v.style.opacity = "0";
+      v.addEventListener("loadedmetadata", () => {
+        v.addEventListener("seeked", () => { v.play().catch(() => {}); v.addEventListener("playing", () => requestAnimationFrame(() => { v.style.opacity = ""; }), { once: true }); }, { once: true });
+        v.currentTime = t;
+      }, { once: true });
+      setTimeout(() => { if (V.video === v && v.style.opacity === "0") { v.style.opacity = ""; if (v.paused) v.play().catch(() => {}); } }, 2500);   // never stuck hidden
+    }
     v.addEventListener("play", updateDeck); v.addEventListener("pause", updateDeck);
     fill(frame, v); V.video = v;
-    v.play().catch(() => {});
+    if (!seekFirst) v.play().catch(() => {});
     $("#deck").hidden = false;
   } else {
     fill(frame, h("img", { src: m.src, alt: S.post.caption?.slice(0, 120) || "" }));

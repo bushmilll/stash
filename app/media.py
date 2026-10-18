@@ -203,10 +203,10 @@ def clip(media_id, start: float, end: float, fmt="mp4", width=None, fps=None):
         head = [FFMPEG, "-y", "-v", "error", "-ss", f"{start:.3f}", "-t", f"{dur:.3f}", "-i", str(src), *vf]
         tail = ["-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(out)]
         try:
-            run(head + ["-c:v", "libx264", "-crf", "14", "-preset", "slow"] + tail)
+            run(head + ["-c:v", "libx264", "-crf", "14", "-preset", "slow", "-g", "30"] + tail)
         except RuntimeError:
             # ffmpeg builds without x264: use the Mac's hardware encoder at a high bitrate instead
-            run(head + ["-c:v", "h264_videotoolbox", "-b:v", "30M"] + tail)
+            run(head + ["-c:v", "h264_videotoolbox", "-b:v", "30M", "-g", "30"] + tail)
     return out
 
 
