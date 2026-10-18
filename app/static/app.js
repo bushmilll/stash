@@ -214,18 +214,13 @@ const SORT_OPTS = [
   { value: "saved", label: "Newest saves" }, { value: "saved_old", label: "Oldest saves" },
   { value: "posted", label: "Newest posts" }, { value: "random", label: "Shuffle" }];
 const FAV_SORTS = [{ value: "fav", label: "Newest favs" }, { value: "fav_old", label: "Oldest favs" }];
-const BEST = { value: "best", label: "Best match" };
-// searching (words, a color, an image) starts on Best match; pick any other order and the same results re-sort
-const rankedView = () => searchActive() || !!(S.filter.color || S.filter.similar || S.filter.simimg);
+
 // in Favorites the Sort menu also offers newest / oldest favs (and remembers your pick for next time you're there)
 function syncSortOptions() {
   const sel = $("#sort"); if (!sel) return;
   const inFav = !!S.filter.favorite, isFav = S.sort === "fav" || S.sort === "fav_old";
-  const ranked = rankedView();
-  if (ranked && !S.inSearch) { S.inSearch = true; S.sortBeforeSearch = S.sort; S.sort = "best"; }
-  if (!ranked && S.inSearch) { S.inSearch = false; if (S.sort === "best" || S.sortBeforeSearch) S.sort = S.sortBeforeSearch || "saved"; delete S.sortBeforeSearch; }
-  if (!ranked && S.sort === "best") S.sort = "saved";
-  sel.setOptions([...(ranked ? [BEST] : []), ...(inFav ? FAV_SORTS : []), ...SORT_OPTS]);
+  if (S.sort === "best") S.sort = "saved";
+  sel.setOptions([...(inFav ? FAV_SORTS : []), ...SORT_OPTS]);
   if (!inFav && isFav) { S.favSort = S.sort; S.sort = "saved"; }
   else if (inFav && !isFav && S.favSort && S.sortBeforeFav === undefined) { S.sortBeforeFav = S.sort; S.sort = S.favSort; }
   if (!inFav && S.sortBeforeFav !== undefined) { S.sort = S.sortBeforeFav; delete S.sortBeforeFav; }

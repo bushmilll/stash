@@ -158,6 +158,7 @@ async def _matching(qp, skip=()):
                 v = min(seen, key=lambda v: v[0])
                 hits[pid] = (v[1], v[2])
         ranked = [pid for pid, _ in sorted(scored.items(), key=lambda kv: -kv[1])]
+        hits["_scores"] = scored
     elif qp.get("similar"):
         v = analyze.vec_for_post(int(qp["similar"]))
         ranked = analyze.nearest(v, exclude=int(qp["similar"]), k=300) if v is not None else []
@@ -173,9 +174,35 @@ def _sql_where(where):
     return f"WHERE {' AND '.join(where)}" if where else ""
 
 
+def _tiered(c, ids, scores, qp, n_tiers=3):
+    """Search results keep the best matches on top, in your Sort order inside each group: the strong matches
+    first (newest first, oldest first, shuffled...), then the looser ones, then the stretches."""
+    if len(ids) < 2:
+        return ids
+    if scores:
+        vals = [scores.get(i, 0.0) for i in ids]
+        hi, lo = float(np.percentile(vals, 95)), min(vals)   # one standout result doesn't push everything else down
+        span = (hi - lo) or 1.0
+        tier = {i: max(0, min(n_tiers - 1, int((hi - scores.get(i, lo)) / span * n_tiers))) for i in ids}
+    else:   # ranked by likeness without a score: thirds by position
+        tier = {i: min(n_tiers - 1, n * n_tiers // len(ids)) for n, i in enumerate(ids)}
+    srt = qp.get("sort") or "saved"
+    if srt == "random":
+        import random
+        rnd = random.Random(int(qp.get("seed") or 0))
+        key = {i: rnd.random() for i in sorted(ids)}
+    else:
+        order = [r[0] for r in c.execute(
+            f"SELECT p.id FROM posts p WHERE p.id IN (SELECT value FROM json_each(?)) ORDER BY {SORTS.get(srt, SORTS['saved'])}",
+            (json.dumps(ids),))]
+        key = {i: n for n, i in enumerate(order)}
+    return sorted(ids, key=lambda i: (tier[i], key.get(i, 1 << 30)))
+
+
 async def matching_ids(qp, skip=()):
     """Every post id that matches, in display order (used for counts and Select all)."""
     ranked, hits, joins, where, args = await _matching(qp, skip)
+    scores = hits.pop("_scores", None)
     c = db.conn()
     if ranked is not None or qp.get("color"):
         rows = c.execute(f"SELECT p.id, (SELECT a2.palette FROM media m2 JOIN analysis a2 ON a2.media_id=m2.id "
@@ -196,21 +223,13 @@ async def matching_ids(qp, skip=()):
                     sc = analyze.color_score(cands[i], target)
                     if sc >= 0.08:
                         scored.append((sc * 0.5, i))
-            ids = [i for _, i in scored] if ranked is not None else [i for _, i in sorted(scored, key=lambda t: -t[0])]
-        srt = qp.get("sort") or "best"
-        if srt != "best" and srt in SORTS and ids:   # you picked an order: same matches, put in that order
-            if srt == "random":
-                import random
-                ids = sorted(ids)
-                random.Random(int(qp.get("seed") or 0)).shuffle(ids)
+            if ranked is not None:
+                ids = [i for _, i in scored]
             else:
-                order = [r[0] for r in c.execute(
-                    f"SELECT p.id FROM posts p WHERE p.id IN (SELECT value FROM json_each(?)) ORDER BY {SORTS[srt]}",
-                    (json.dumps(ids),))]
-                pos = {i: n for n, i in enumerate(order)}
-                ids = sorted(ids, key=lambda i: pos.get(i, 1 << 30))
-            return ids, hits, True
-        return ids, hits, True
+                scored.sort(key=lambda t: -t[0])
+                ids = [i for _, i in scored]
+                scores = {i: sc for sc, i in scored}
+        return _tiered(c, ids, scores, qp), hits, True
     order = SORTS.get(qp.get("sort", "saved"), SORTS["saved"])
     shuffle = qp.get("sort") == "random" and qp.get("seed")
     if shuffle:
@@ -247,7 +266,8 @@ async def list_posts(request):
                 pass
         entries = [(i, k, t) for i in ids for k, t in (starred.get(i) or [(None, when.get(i, 0))])]
         sort = qp.get("sort")
-        if sort in ("fav", "fav_old"):   # each starred slide sits where you starred it
+        searching = bool(search_terms(qp) or qp.get("color") or qp.get("similar") or qp.get("simimg"))
+        if sort in ("fav", "fav_old") and not searching:   # each starred slide sits where you starred it
             pos = {i: n for n, i in enumerate(ids)}
             entries.sort(key=lambda e: ((-e[2] if sort == "fav" else e[2]), pos[e[0]]))
         entries = [(i, k) for i, k, _ in entries]
