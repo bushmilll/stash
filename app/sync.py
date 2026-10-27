@@ -599,7 +599,71 @@ def _oldest():
 
 def feeds_incomplete():
     s = db.load_settings()
-    return [u for u, _ in _feeds(s) if not _feed_state(u)["complete"]]
+    out = [u for u, _ in _feeds(s) if not _feed_state(u)["complete"]]
+    o = _order_url(s)
+    if not out and o and not _feed_state(o)["complete"]:
+        out.append(o)
+    return out
+
+
+# ---------- one save order across every collection ----------
+# Each collection feed is newest-first, but nothing says how saves in different collections interleave.
+# Instagram's "All posts" saved view does: reading it once (order only, nothing is downloaded) puts
+# Everything in the order you actually saved things. It runs again after a new collection finishes catching up.
+
+def _order_url(s):
+    user = (s.get("instagram_username") or "").strip().lstrip("@")
+    return f"https://www.instagram.com/{user}/saved/all-posts/#order" if user and len(_feeds(s)) > 1 else None
+
+
+def _order_reset():
+    o = _order_url(db.load_settings())
+    if o:
+        _save_feed(o, complete=0, cursor=None, seen=0)
+        db.save_settings({"order_base": 0})
+
+
+def _order_pass(jid, s):
+    """Walk the All posts view (bookmarked, resumable) and stamp each save you have by its place in it."""
+    o = _order_url(s)
+    if not o or any(not _feed_state(u)["complete"] for u, _ in _feeds(s)):
+        return False
+    st = _feed_state(o)
+    if st["complete"]:
+        return False
+    base = int(s.get("order_base") or 0)
+    if not base or not st["seen"]:
+        base = db.now()
+        db.save_settings({"order_base": base})
+    holder, seen, placed = {}, 0, 0
+    last_save = started = time.time()
+    bookmark = lambda **kw: _save_feed(o, cursor=getattr(holder.get("ex"), "_cursor", None) or st["cursor"], seen=st["seen"] + seen, **kw)
+    try:
+        for post, _files in _iter_posts(o.split("#")[0], st["cursor"], holder):
+            _check_cancel()
+            seen += 1
+            code = post.get("post_shortcode")
+            if code:
+                with db.tx() as c:
+                    before = c.total_changes
+                    c.execute("UPDATE posts SET saved_at=? WHERE shortcode=? AND COALESCE(saved_src,'feed')='feed'",
+                              (base - (st["seen"] + seen), code))
+                    placed += c.total_changes - before
+            if time.time() - last_save > 10:
+                bookmark(); last_save = time.time()
+            if time.time() - started > DEEP_STRETCH and _has_upgrades():
+                bookmark()
+                return True
+            _update(jid, message=f"Putting Everything in the order you saved it: {st['seen'] + seen} checked")
+        else:
+            _save_feed(o, complete=1, cursor=None, seen=st["seen"] + seen)
+    except (Cancelled, StopSync):
+        bookmark()
+        raise
+    except Exception as e:
+        bookmark()
+        raise StopSync(f"Save order: {_friendly(e)}")
+    return True
 
 
 def run_sync(jid):
@@ -709,6 +773,7 @@ def _run_sync(jid, s, feeds, stop_after, rerank, run_start, ranked, pool, counts
                     if mode == "deep" or not st["complete"]:
                         _save_feed(url, complete=1, cursor=None, seen=(st["seen"] + seen) if mode == "deep" else seen)
                         st["complete"] = 1
+                        _order_reset()   # a collection is fully in: line everything up again across collections
             except (Cancelled, StopSync):
                 if mode == "deep":
                     _save_feed(url, cursor=getattr(holder.get("ex"), "_cursor", None) or st["cursor"], seen=st["seen"] + seen)
@@ -722,12 +787,16 @@ def _run_sync(jid, s, feeds, stop_after, rerank, run_start, ranked, pool, counts
     pool.finish()
     if "e" in stop:
         raise stop["e"]
+    ordered = False if paused else _order_pass(jid, s)
     new_total, failed_posts = counts["new"], counts["failed"]
     if rerank and all(_feed_state(u)["complete"] for u, _ in feeds):   # re-ordered all the way down
         db.save_settings({"rank_version": 1})
     msg = f"Synced {len(feeds)} feed(s): {new_total} new post(s)"
     if paused:
         msg += ". Catching up continues after a round of quality upgrades"
+    if ordered:
+        msg += ". Lined up Everything in the order you saved it" if _feed_state(_order_url(s))["complete"] else \
+            ". Lining up Everything in the order you saved it continues next round"
     if linked:
         msg += f", {linked} collection link(s) updated"
     if failed_posts:

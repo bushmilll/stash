@@ -343,6 +343,7 @@ DEFAULT_SETTINGS = {
     "backfill_per_run": 150,             # max export-only posts to fetch per backfill run
     "request_delay": [6, 12],            # seconds between Instagram API requests (random in range)
     "ai_enabled": False,                 # on-device AI tags (model downloaded on first use)
+    "order_base": 0,                     # the save-order pass: newest save sits just below this time
     "rank_version": 0,                   # 1 = save order has been rebuilt from the collection feeds
     "media_dir": "",                     # where originals live; empty = inside the library folder
     "media_move_from": "",               # a move in progress (resumes if the app was closed)
