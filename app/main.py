@@ -605,6 +605,8 @@ async def jobs(request):
         if body.get("action") == "cancel":
             sync.cancel()
             return JSONResponse({"ok": True})
+        if body.get("action") == "check":   # ⌘R: new saves from Instagram now
+            return JSONResponse({"ids": [sync.check_now()]})
         kinds = body.get("kinds") or ["sync"]
         return JSONResponse({"ids": [sync.enqueue(k) for k in kinds if k in ("sync", "backfill", "upgrade")]})
     rows = db.conn().execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 8").fetchall()

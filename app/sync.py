@@ -128,16 +128,18 @@ def _check_cancel():
 def _worker():
     while True:
         jid, kind = _queue.get()
-        _current.update(id=jid, cancel=False)
+        if not db.conn().execute("SELECT 1 FROM jobs WHERE id=? AND status='queued'", (jid,)).fetchone():
+            continue   # stood aside for a quick check; the scheduler brings it back
+        _current.update(id=jid, cancel=False, why=None)
         _update(jid, status="running", message="Starting…")
         awake = _keep_awake()
         try:
-            fn = {"sync": run_sync, "backfill": run_backfill, "upgrade": run_upgrade,
+            fn = {"sync": run_sync, "check": run_check, "backfill": run_backfill, "upgrade": run_upgrade,
                   "move": lambda j: storage.run_move(j, _update, _check_cancel)}[kind]
             msg = fn(jid)
             _update(jid, status="done", message=msg, finished=db.now())
         except Cancelled:
-            _update(jid, status="cancelled", message="Stopped", finished=db.now())
+            _update(jid, status="cancelled", message=_current.get("why") or "Stopped", finished=db.now())
         except StopSync as e:
             _update(jid, status="error", message=str(e), finished=db.now())
         except Exception as e:
@@ -666,7 +668,27 @@ def _order_pass(jid, s):
     return True
 
 
-def run_sync(jid):
+def run_check(jid):
+    """⌘R: look at the top of each collection for saves you just made, nothing else."""
+    return run_sync(jid, top_only=True)
+
+
+def check_now():
+    """Start a quick check right away. A long-running job (catching up, re-ordering, upgrades) steps aside:
+    it bookmarks where it is and carries on by itself afterwards."""
+    with db.tx() as c:
+        c.execute("DELETE FROM jobs WHERE status='queued' AND kind IN ('sync','upgrade','backfill')")
+    running = db.conn().execute("SELECT kind FROM jobs WHERE status='running'").fetchone()
+    if running and running[0] == "check":
+        return _current.get("id")
+    if running and running[0] in ("sync", "upgrade", "backfill"):
+        _current["why"] = "Paused for a quick check; picks up where it left off"
+        _current["cancel"] = True
+    # drop the queued ones from the in-memory line too (the worker skips jobs that no longer exist)
+    return enqueue("check")
+
+
+def run_sync(jid, top_only=False):
     s = db.load_settings()
     _configure(s)
     feeds = _feeds(s)
@@ -700,13 +722,13 @@ def run_sync(jid):
 
     pool = _Downloads(done)
     try:
-        return _run_sync(jid, s, feeds, stop_after, rerank, run_start, ranked, pool, counts, stop)
+        return _run_sync(jid, s, feeds, stop_after, rerank, run_start, ranked, pool, counts, stop, top_only)
     except BaseException:
         pool.abort()
         raise
 
 
-def _run_sync(jid, s, feeds, stop_after, rerank, run_start, ranked, pool, counts, stop):
+def _run_sync(jid, s, feeds, stop_after, rerank, run_start, ranked, pool, counts, stop, top_only=False):
     paused, linked = False, 0
     for fi, (url, name) in enumerate(feeds):
         label = name or ("All saved" if "all-posts" in url else url)
@@ -714,7 +736,7 @@ def _run_sync(jid, s, feeds, stop_after, rerank, run_start, ranked, pool, counts
         # 1) the top of the feed: brand-new saves. Once Stash has read the whole collection, it can stop as soon
         #    as it reaches posts it already has. Until then it keeps going past them (see pass 2).
         passes = [("top", None)]
-        if not st["complete"]:
+        if not st["complete"] and not top_only:
             passes.append(("deep", st["cursor"]))
         for mode, cursor in passes:
             known_streak, seen = 0, 0
@@ -744,7 +766,7 @@ def _run_sync(jid, s, feeds, stop_after, rerank, run_start, ranked, pool, counts
                                     db.reindex(c, pid)
                         # the top pass stops at saves it already has; the catch-up pass (bookmarked) does the rest,
                         # including the one-time re-ordering, so a restart never sends it back to the start
-                        if mode == "top" and known_streak >= stop_after:
+                        if mode == "top" and known_streak >= (min(stop_after, 12) if top_only else stop_after):
                             break
                     else:
                         known_streak = 0
@@ -787,10 +809,13 @@ def _run_sync(jid, s, feeds, stop_after, rerank, run_start, ranked, pool, counts
     pool.finish()
     if "e" in stop:
         raise stop["e"]
-    ordered = False if paused else _order_pass(jid, s)
+    ordered = False if (paused or top_only) else _order_pass(jid, s)
     new_total, failed_posts = counts["new"], counts["failed"]
     if rerank and all(_feed_state(u)["complete"] for u, _ in feeds):   # re-ordered all the way down
         db.save_settings({"rank_version": 1})
+    if top_only:
+        return (f"{new_total} new save{'s' if new_total != 1 else ''} from Instagram" if new_total else "Up to date: no new saves") + \
+            (f", {failed_posts} will be retried" if failed_posts else "")
     msg = f"Synced {len(feeds)} feed(s): {new_total} new post(s)"
     if paused:
         msg += ". Catching up continues after a round of quality upgrades"

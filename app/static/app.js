@@ -1618,7 +1618,7 @@ async function startJobs(kinds) {
 function renderJobs() {
   const list = $("#jobList");
   if (list) fill(list, ...S.jobs.slice(0, 5).map((j) => h("div", { class: "job" },
-    h("span", { class: "k" }, { sync: "Sync", backfill: "Backlog", upgrade: "Upgrade", move: "Storage" }[j.kind] || j.kind),
+    h("span", { class: "k" }, { sync: "Sync", check: "New saves", backfill: "Backlog", upgrade: "Upgrade", move: "Storage" }[j.kind] || j.kind),
     h("div", {},
       h("span", { class: "s-" + j.status }, j.message || j.status),
       j.status === "running" && j.total ? h("div", { class: "progress" }, h("div", { style: `width:${Math.round((j.done / j.total) * 100)}%` })) : null,
@@ -1627,7 +1627,7 @@ function renderJobs() {
   const pill = $("#syncPill");
   pill.classList.toggle("live", !!running);
   pill.classList.toggle("error", !running && S.jobs[0]?.status === "error");
-  $("#syncText").textContent = running ? (running.kind === "sync" ? "Syncing" : "Fetching") : "Sync";
+  $("#syncText").textContent = running ? (running.kind === "sync" ? "Syncing" : running.kind === "check" ? "Checking" : "Fetching") : "Sync";
 }
 let pollTimer, wasRunning = false;
 async function pollJobs(now) {
@@ -1813,7 +1813,21 @@ document.addEventListener("keydown", (e) => {
   if (!(e.metaKey || e.ctrlKey) || $("#modalRoot").children.length) return;
   if (e.key === "[") { e.preventDefault(); e.stopImmediatePropagation(); navGo(-1); }
   else if (e.key === "]") { e.preventDefault(); e.stopImmediatePropagation(); navGo(1); }
+  else if (e.key.toLowerCase() === "r" && !e.shiftKey && !e.altKey) { e.preventDefault(); e.stopImmediatePropagation(); refreshNow(); }
 }, true);
+// ⌘R: grab anything you just saved on Instagram (top of each collection only, a few seconds), then refresh.
+// Long background work (catching up, re-ordering, upgrades) steps aside and picks up where it left off.
+let lastRefresh = 0;
+async function refreshNow() {
+  if (Date.now() - lastRefresh < 4000) return;
+  lastRefresh = Date.now();
+  loadSidebar(); reload();
+  try {
+    await api("/api/jobs", { method: "POST", body: { action: "check" } });
+    toast("Checking Instagram for new saves…");
+    pollJobs(true);
+  } catch (e) { toast(esc(e.message), { error: true }); }
+}
 window.addEventListener("mouseup", (e) => { if (e.button === 3) navGo(-1); else if (e.button === 4) navGo(1); });
 
 const setView = (v) => { S.view = v; try { localStorage.setItem("sf-view", v); } catch {} layout(true); };
