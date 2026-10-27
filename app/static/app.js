@@ -354,10 +354,18 @@ function updateFilter(patch) {
   for (const k in S.filter) if (!S.filter[k]) delete S.filter[k];
   writeHash(); clearSelection(); reload(); navCommit();
 }
+const sideKey = (f) => JSON.stringify(Object.fromEntries(Object.entries(f).filter(([k]) => NAV_KEYS.includes(k)).sort()));
 function navItem(label, n, f, extra = {}, cls = "") {
-  const on = JSON.stringify(f) === JSON.stringify(Object.fromEntries(Object.entries(S.filter).filter(([k]) => NAV_KEYS.includes(k))));
-  return h("button", { class: "nav-item " + cls + (on ? " on" : ""), onclick: () => setFilter(f), ...extra },
+  const key = sideKey(f);
+  const b = h("button", { class: "nav-item " + cls + (key === sideKey(S.filter) ? " on" : ""), onclick: () => setFilter(f), ...extra },
     h("span", { class: "label" }, label), n != null ? h("span", { class: "n" }, pad(n)) : null);
+  b.dataset.nav = key;
+  return b;
+}
+// the highlight follows what you're looking at the moment you click (not on the next sidebar refresh)
+function markSidebar() {
+  const cur = sideKey(S.filter);
+  document.querySelectorAll("#nav .nav-item[data-nav]").forEach((b) => b.classList.toggle("on", b.dataset.nav === cur));
 }
 function renderSidebar() {
   if (document.activeElement?.classList.contains("side-search")) return;   // don't yank the box away mid-typing
@@ -754,13 +762,22 @@ document.addEventListener("mouseout", (e) => { const l = e.target.closest?.(".wh
 // A muted preview that starts cleanly at t: it lands on the moment first, then plays, and stays invisible until
 // real frames are showing. Jumping while it's already playing is what made some previews glitch in the Mac app.
 function startAt(src, t, { loop = false } = {}) {
-  const v = h("video", { src, muted: true, loop, playsinline: true, preload: "auto", class: "pv-wait" });
+  if (!(t > 0)) {   // from the top: play straight away, like always
+    const v = h("video", { src, muted: true, loop, playsinline: true, preload: "auto" });
+    v.muted = true; v.play().catch(() => {});
+    return v;
+  }
+  // from a matched moment: ask for that spot up front, land on it, then play; hidden until frames show
+  const v = h("video", { src: `${src}#t=${t.toFixed(2)}`, muted: true, loop, playsinline: true, preload: "auto", class: "pv-wait" });
   v.muted = true;
-  const go = () => v.play().catch(() => {});
-  v.addEventListener("playing", () => requestAnimationFrame(() => requestAnimationFrame(() => v.classList.remove("pv-wait"))), { once: true });
-  if (t > 0) {
-    v.addEventListener("loadedmetadata", () => { v.addEventListener("seeked", go, { once: true }); v.currentTime = t; }, { once: true });
-  } else v.addEventListener("loadeddata", go, { once: true });
+  const show = () => v.classList.remove("pv-wait");
+  v.addEventListener("playing", () => requestAnimationFrame(show), { once: true });
+  v.addEventListener("loadedmetadata", () => {
+    if (Math.abs(v.currentTime - t) < 0.1) { v.play().catch(() => {}); return; }   // already there
+    v.addEventListener("seeked", () => v.play().catch(() => {}), { once: true });
+    v.currentTime = t;
+  }, { once: true });
+  setTimeout(show, 1500);   // never stays hidden
   return v;
 }
 function tile(p, i, ratio) {
@@ -848,6 +865,7 @@ async function loadMore() {
 }
 function reload() {
   S.opened = new Set();
+  markSidebar();
   syncSortOptions();
   loadFacets();
   S.gen++; S.items = []; S.offset = 0; S.more = true; S.total = null; S.loading = false;
